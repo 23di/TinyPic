@@ -1,0 +1,13 @@
+{
+  "name": "TinyPic Image Compressor",
+  "id": "1612595698368227712",
+  "api": "1.0.0",
+  "editorType": ["figma", "dev"],
+  "capabilities": ["inspect"],
+  "main": "dist/code.js",
+  "ui": "dist/ui.html",
+  "documentAccess": "dynamic-page",
+  "networkAccess": {
+    "allowedDomains": ["none"]
+  }
+}

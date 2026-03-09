@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.ui-build-tmp/
+.dist-build-tmp/
+.DS_Store
+.claude/
+.codex/
+publish/
