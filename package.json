@@ -4,7 +4,7 @@
   "main": "dist/code.js",
   "scripts": {
     "build": "node scripts/build.mjs",
-    "check": "node --check scripts/build.mjs && node --experimental-default-type=module --check src/code.js && node --experimental-default-type=module --check src/main.js",
+    "check": "node --check scripts/build.mjs && node --experimental-default-type=module --check src/code.js && node --experimental-default-type=module --check src/main.js && node --experimental-default-type=module --check src/raster-export-worker.js",
     "dev": "vite",
     "preview": "vite preview --outDir dist --port 4173"
   },

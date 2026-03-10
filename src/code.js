@@ -4,6 +4,7 @@ const STORAGE_KEY = 'frame-exporter-plugin-state-v1';
 const PREVIEW_WIDTH = 128;
 const DEFAULT_EXPORT_CONCURRENCY = 3;
 const MAX_EXPORT_CONCURRENCY = 6;
+const EXPORT_FILE_ACK_TIMEOUT_MS = 120000;
 const SCALE_OPTIONS = [0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4];
 const FORMAT_META = {
   PNG: { extension: 'png', mimeType: 'image/png', vector: false },
@@ -1649,7 +1650,7 @@ async function handleExport(message) {
         baselineBytes,
       });
 
-      const ack = await waitForFileAck(session, deliveryId, 8000);
+      const ack = await waitForFileAck(session, deliveryId, EXPORT_FILE_ACK_TIMEOUT_MS);
       if (!ack.ok) {
         throw new Error(ack.detail || 'The UI did not confirm the download.');
       }

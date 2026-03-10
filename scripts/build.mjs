@@ -29,6 +29,9 @@ async function bundleUiScript() {
     configFile: false,
     root: rootDir,
     plugins: [wasm(), topLevelAwait()],
+    worker: {
+      format: 'iife',
+    },
     logLevel: 'warn',
     build: {
       lib: {

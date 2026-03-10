@@ -759,11 +759,20 @@
       display: flex;
       flex-direction: column;
       gap: 4px;
+      flex: 1 1 auto;
+      min-width: 0;
+    }
+
+    .file-content-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
       min-width: 0;
     }
 
     .file-name {
       margin: 0;
+      min-width: 0;
       font-size: 13px;
       line-height: 1.35;
       font-weight: 600;
@@ -901,8 +910,10 @@
     .footer {
       position: relative;
       display: flex;
-      align-items: stretch;
+      flex-direction: column;
+      align-items: flex-start;
       justify-content: flex-start;
+      gap: 4px;
       margin-top: auto;
       min-height: 34px;
       padding: 12px 16px;
@@ -922,17 +933,64 @@
     .footer-status {
       display: flex;
       align-items: center;
+      gap: 8px;
       min-width: 0;
       width: 100%;
       text-align: left;
     }
 
-    .footer-status {
-      display: none !important;
+    .footer-meta-text {
+      min-width: 0;
     }
 
-    .footer-status:empty {
-      display: none;
+    .footer-status {
+      color: var(--muted);
+    }
+
+    .warning-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 18px;
+      height: 18px;
+      flex: 0 0 auto;
+      border-radius: 999px;
+      border: 1px solid var(--warning);
+      background: var(--warning-soft);
+      color: var(--warning);
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 18px;
+      cursor: help;
+      text-align: center;
+      user-select: none;
+    }
+
+    .overlay-tooltip {
+      position: fixed;
+      left: 0;
+      top: 0;
+      width: min(280px, calc(100vw - 48px));
+      padding: 8px 10px;
+      border-radius: var(--radius-md);
+      background: var(--panel);
+      border: none;
+      box-shadow: 0 10px 24px rgba(0, 0, 0, 0.18);
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 500;
+      line-height: 1.45;
+      text-align: left;
+      pointer-events: none;
+      opacity: 0;
+      transform: translateY(4px);
+      transition: opacity 120ms ease, transform 120ms ease;
+      z-index: 50;
+    }
+
+    .overlay-tooltip.is-visible {
+      opacity: 1;
+      transform: translateY(0);
     }
 
     .footer strong {
@@ -1437,6 +1495,7 @@
       </button>
     </section>
   </div>
+  <div class="overlay-tooltip" id="overlayTooltip" hidden></div>
 
   <script type="module" src="./src/main.js"></script>
 </body>

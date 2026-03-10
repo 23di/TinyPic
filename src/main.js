@@ -1,6 +1,7 @@
 import LibImageQuant from '@fe-daily/libimagequant-wasm';
 import * as wasmModuleNamespace from '@fe-daily/libimagequant-wasm/wasm/libimagequant_wasm.js';
-import { optimise as optimisePng } from '@jsquash/oxipng';
+import initOxipng, { optimise as optimisePngSync } from '@jsquash/oxipng/codec/pkg/squoosh_oxipng.js';
+import RasterExportWorker from './raster-export-worker.js?worker&inline';
 
 (function () {
   const FORMAT_OPTIONS = [
@@ -368,6 +369,18 @@ import { optimise as optimisePng } from '@jsquash/oxipng';
     { value: 'export', label: 'Export' },
     { value: 'data', label: 'Data' },
   ];
+  const EXPORT_BUTTON_BUSY_FRAMES = [
+    '✱', '✲', '✳', '✴', '✳', '✲', '✱', '✲', '✳', '✴', '✳', '✲',
+    '░', '░', '▒', '▒', '▓', '▓', '█', '▓', '▒', '░',
+    '░', '░', '▒', '▒', '▓', '▓', '█', '▓', '▒', '░',
+    '▖', '▘', '▝', '▗', '▚', '▞', '▛', '▜', '▟', '▙',
+    '▖', '▘', '▝', '▗', '▚', '▞', '▛', '▜', '▟', '▙',
+  ];
+  const EXPORT_BUTTON_BUSY_INTERVAL_MS = 80;
+  const WARNING_TOOLTIP_OFFSET_PX = 10;
+  const WARNING_TOOLTIP_EDGE_PADDING_PX = 12;
+  const LARGE_RASTER_WARNING_SINGLE_BYTES = 4 * 1024 * 1024;
+  const LARGE_RASTER_WARNING_SINGLE_PIXELS = 8_000_000;
 
   let estimateTimer = null;
   let persistTimer = null;
@@ -381,6 +394,14 @@ import { optimise as optimisePng } from '@jsquash/oxipng';
   let exportFileQueue = Promise.resolve();
   let zipBuffer = null;
   let pngQuantizer = null;
+  let oxipngInitPromise = null;
+  let exportButtonAnimationTimer = null;
+  let exportButtonAnimationIndex = 0;
+  let exportButtonLockedWidth = 0;
+  let activeWarningTooltipTarget = null;
+  let rasterExportWorker = null;
+  let rasterExportRequestSeed = 0;
+  const pendingRasterExportRequests = new Map();
   const expandedPresetCards = new Set();
 
   const PROFILE_STORAGE_KEY = 'fcompressor_v1_profile';
@@ -458,6 +479,7 @@ import { optimise as optimisePng } from '@jsquash/oxipng';
     emptyState: document.getElementById('emptyState'),
     footerStatus: document.getElementById('footerStatus'),
     footerMeta: document.getElementById('footerMeta'),
+    overlayTooltip: document.getElementById('overlayTooltip'),
     resizeGrip: document.getElementById('resizeGrip'),
   };
 
@@ -573,6 +595,79 @@ import { optimise as optimisePng } from '@jsquash/oxipng';
       pngQuantizer = new LibImageQuant({ wasmModule });
     }
     return pngQuantizer;
+  }
+
+  async function optimisePng(bytes, options) {
+    if (!oxipngInitPromise) {
+      oxipngInitPromise = initOxipng();
+    }
+    await oxipngInitPromise;
+    return optimisePngSync(
+      toUint8Array(bytes),
+      options.level ?? 2,
+      Boolean(options.interlace),
+      Boolean(options.optimiseAlpha),
+    );
+  }
+
+  function getRasterExportWorker() {
+    if (!rasterExportWorker) {
+      rasterExportWorker = new RasterExportWorker({ name: 'raster-export-worker' });
+      rasterExportWorker.addEventListener('message', handleRasterExportWorkerMessage);
+      rasterExportWorker.addEventListener('error', handleRasterExportWorkerError);
+      rasterExportWorker.addEventListener('messageerror', handleRasterExportWorkerMessageError);
+    }
+    return rasterExportWorker;
+  }
+
+  function settleRasterExportRequest(requestId, result) {
+    const pending = pendingRasterExportRequests.get(requestId);
+    if (!pending) {
+      return;
+    }
+    pendingRasterExportRequests.delete(requestId);
+    pending.resolve(result);
+  }
+
+  function handleRasterExportWorkerMessage(event) {
+    const message = event.data;
+    if (!message || message.type !== 'process-raster-result') {
+      return;
+    }
+
+    if (message.ok) {
+      settleRasterExportRequest(message.requestId, {
+        ok: true,
+        mimeType: message.mimeType || 'application/octet-stream',
+        bytes: toUint8Array(message.bytes),
+      });
+      return;
+    }
+
+    settleRasterExportRequest(message.requestId, {
+      ok: false,
+      error: typeof message.error === 'string' ? message.error : 'Worker compression failed.',
+    });
+  }
+
+  function rejectAllRasterExportRequests(message) {
+    const errorMessage = typeof message === 'string' && message ? message : 'Worker compression failed.';
+    pendingRasterExportRequests.forEach((pending, requestId) => {
+      pending.reject(new Error(errorMessage));
+      pendingRasterExportRequests.delete(requestId);
+    });
+  }
+
+  function handleRasterExportWorkerError(event) {
+    rejectAllRasterExportRequests(
+      event && event.message ? `Worker compression failed. ${event.message}` : 'Worker compression failed.',
+    );
+    rasterExportWorker = null;
+  }
+
+  function handleRasterExportWorkerMessageError() {
+    rejectAllRasterExportRequests('Worker compression failed while receiving a response.');
+    rasterExportWorker = null;
   }
 
   function createNode(tagName, className, textContent) {
@@ -2023,6 +2118,39 @@ import { optimise as optimisePng } from '@jsquash/oxipng';
     }
   }
 
+  async function prepareRasterPayloadInWorker(message, presetSettings) {
+    const requestId = `raster-${++rasterExportRequestSeed}`;
+    const sourceBytes = toUint8Array(message.bytes);
+    const transferableBytes = new Uint8Array(sourceBytes);
+    const worker = getRasterExportWorker();
+
+    const resultPromise = new Promise((resolve, reject) => {
+      pendingRasterExportRequests.set(requestId, { resolve, reject });
+    });
+
+    worker.postMessage(
+      {
+        type: 'process-raster',
+        requestId,
+        format: message.format,
+        sourceMimeType: message.sourceMimeType || 'image/png',
+        presetSettings,
+        bytes: transferableBytes.buffer,
+      },
+      [transferableBytes.buffer],
+    );
+
+    const result = await resultPromise;
+    if (!result.ok) {
+      throw new Error(result.error || 'Worker compression failed.');
+    }
+
+    return {
+      bytes: result.bytes,
+      mimeType: result.mimeType,
+    };
+  }
+
   async function prepareDownloadPayload(message) {
     const sourceBytes = toUint8Array(message.bytes);
     if (!sourceBytes.byteLength) {
@@ -2037,6 +2165,12 @@ import { optimise as optimisePng } from '@jsquash/oxipng';
     }
 
     const presetSettings = getPresetSettings(state.presetSettings, message.format, message.preset);
+    try {
+      return await prepareRasterPayloadInWorker(message, presetSettings);
+    } catch (error) {
+      console.warn('Raster export worker failed, falling back to main thread.', error);
+    }
+
     if (message.format === 'PNG') {
       return preparePngPayload(
         sourceBytes,
@@ -3193,6 +3327,7 @@ import { optimise as optimisePng } from '@jsquash/oxipng';
     const totalFiles = Number(message.total) || 0;
     const isDirectoryMode = activeExportTarget && activeExportTarget.mode === 'directory';
     zipBuffer = (!isDirectoryMode && totalFiles > 1) ? { files: [] } : null;
+    lockExportButtonWidth();
     state.isExporting = true;
     state.exportProgress = {
       completed: 0,
@@ -3206,11 +3341,7 @@ import { optimise as optimisePng } from '@jsquash/oxipng';
       exportedBytes: null,
       error: '',
     }));
-    updateFooterStatus(
-      activeExportTarget && activeExportTarget.mode === 'directory'
-        ? `Preparing export queue for ${activeExportTarget.label}...`
-        : 'Preparing export queue...',
-    );
+    updateFooterStatus('');
     render();
   }
 
@@ -3358,6 +3489,152 @@ import { optimise as optimisePng } from '@jsquash/oxipng';
     return '0%';
   }
 
+  function getRowReferenceBytes(row) {
+    if (typeof row.baselineBytes === 'number' && row.baselineBytes > 0) {
+      return row.baselineBytes;
+    }
+    if (typeof row.estimateBytes === 'number' && row.estimateBytes > 0) {
+      return row.estimateBytes;
+    }
+    if (typeof row.exportedBytes === 'number' && row.exportedBytes > 0) {
+      return row.exportedBytes;
+    }
+    return null;
+  }
+
+  function getRowScaledPixelCount(row) {
+    if (isVectorFormat(row.format)) {
+      return 0;
+    }
+
+    const width = Math.max(1, Number(row.width) || 0);
+    const height = Math.max(1, Number(row.height) || 0);
+    const scale = normalizeScale(row.scale);
+    return Math.round(width * height * scale * scale);
+  }
+
+  function getLargeRasterWarningForRow(row) {
+    if (!row || isVectorFormat(row.format)) {
+      return '';
+    }
+
+    const rowBytes = getRowReferenceBytes(row);
+    const rowPixels = getRowScaledPixelCount(row);
+    if (rowBytes < LARGE_RASTER_WARNING_SINGLE_BYTES && rowPixels < LARGE_RASTER_WARNING_SINGLE_PIXELS) {
+      return '';
+    }
+
+    const parts = [];
+    if (rowBytes >= LARGE_RASTER_WARNING_SINGLE_BYTES) {
+      parts.push(formatBytes(rowBytes));
+    }
+    if (rowPixels >= LARGE_RASTER_WARNING_SINGLE_PIXELS) {
+      parts.push(formatDimensions(
+        Math.max(1, Math.round((Number(row.width) || 0) * normalizeScale(row.scale))),
+        Math.max(1, Math.round((Number(row.height) || 0) * normalizeScale(row.scale))),
+      ));
+    }
+    return `${row.name || 'Raster export'} is large${parts.length ? ` (${parts.join(' • ')})` : ''}. PNG/JPG compression may take longer.`;
+  }
+
+  function createWarningBadge(message) {
+    const badge = createNode('span', 'warning-badge', 'i');
+    badge.setAttribute('role', 'img');
+    badge.setAttribute('tabindex', '0');
+    badge.setAttribute('aria-label', message);
+    badge.setAttribute('title', message);
+    badge.dataset.tooltip = message;
+    badge.addEventListener('mouseenter', () => {
+      showWarningTooltip(badge);
+    });
+    badge.addEventListener('mouseleave', () => {
+      hideWarningTooltip(badge);
+    });
+    badge.addEventListener('focus', () => {
+      showWarningTooltip(badge);
+    });
+    badge.addEventListener('blur', () => {
+      hideWarningTooltip(badge);
+    });
+    return badge;
+  }
+
+  function positionWarningTooltip(target) {
+    if (!(target instanceof HTMLElement) || dom.overlayTooltip.hidden) {
+      return;
+    }
+
+    const tooltipRect = dom.overlayTooltip.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+    const left = Math.max(
+      WARNING_TOOLTIP_EDGE_PADDING_PX,
+      Math.min(
+        targetRect.left + (targetRect.width / 2) - (tooltipRect.width / 2),
+        viewportWidth - WARNING_TOOLTIP_EDGE_PADDING_PX - tooltipRect.width,
+      ),
+    );
+
+    const availableAbove = targetRect.top - WARNING_TOOLTIP_EDGE_PADDING_PX;
+    const availableBelow = viewportHeight - targetRect.bottom - WARNING_TOOLTIP_EDGE_PADDING_PX;
+    const prefersBelow = availableBelow >= tooltipRect.height + WARNING_TOOLTIP_OFFSET_PX || availableBelow >= availableAbove;
+    let top = prefersBelow
+      ? targetRect.bottom + WARNING_TOOLTIP_OFFSET_PX
+      : targetRect.top - tooltipRect.height - WARNING_TOOLTIP_OFFSET_PX;
+
+    top = Math.max(
+      WARNING_TOOLTIP_EDGE_PADDING_PX,
+      Math.min(top, viewportHeight - WARNING_TOOLTIP_EDGE_PADDING_PX - tooltipRect.height),
+    );
+
+    dom.overlayTooltip.style.left = `${Math.round(left)}px`;
+    dom.overlayTooltip.style.top = `${Math.round(top)}px`;
+  }
+
+  function showWarningTooltip(target) {
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+
+    const message = target.dataset.tooltip;
+    if (!message) {
+      return;
+    }
+
+    activeWarningTooltipTarget = target;
+    dom.overlayTooltip.textContent = message;
+    dom.overlayTooltip.hidden = false;
+    positionWarningTooltip(target);
+    dom.overlayTooltip.classList.add('is-visible');
+  }
+
+  function hideWarningTooltip(target) {
+    if (target && activeWarningTooltipTarget && target !== activeWarningTooltipTarget) {
+      return;
+    }
+
+    activeWarningTooltipTarget = null;
+    dom.overlayTooltip.classList.remove('is-visible');
+    dom.overlayTooltip.hidden = true;
+    dom.overlayTooltip.textContent = '';
+    dom.overlayTooltip.style.left = '0px';
+    dom.overlayTooltip.style.top = '0px';
+  }
+
+  function repositionWarningTooltip() {
+    if (!activeWarningTooltipTarget || dom.overlayTooltip.hidden) {
+      return;
+    }
+
+    if (!document.body.contains(activeWarningTooltipTarget)) {
+      hideWarningTooltip();
+      return;
+    }
+
+    positionWarningTooltip(activeWarningTooltipTarget);
+  }
+
   function getMetricClass(baseClass, stateName) {
     if (stateName === 'error') {
       return `${baseClass} is-error`;
@@ -3462,8 +3739,10 @@ import { optimise as optimisePng } from '@jsquash/oxipng';
     const fileCell = document.createElement('td');
     fileCell.className = 'file-cell';
     fileCell.dataset.label = 'File';
+    const fileContentRow = createNode('div', 'file-content-row');
     const fileStack = createNode('div', 'file-stack');
     const fileName = createNode('p', 'file-name', buildRowFileName(row));
+    const fileWarning = getLargeRasterWarningForRow(row);
     const resultText = getResultText(row);
     const resultLabel = row.status === 'error' ? 'Failed' : resultText;
     const resultClass = row.status === 'error'
@@ -3501,7 +3780,12 @@ import { optimise as optimisePng } from '@jsquash/oxipng';
       fileStack.appendChild(createNode('p', 'file-error', resultText));
     }
 
-    fileCell.appendChild(fileStack);
+    fileContentRow.appendChild(fileStack);
+    if (fileWarning) {
+      fileContentRow.appendChild(createWarningBadge(fileWarning));
+    }
+
+    fileCell.appendChild(fileContentRow);
 
     tableRow.append(previewCell, fileCell);
 
@@ -3509,6 +3793,7 @@ import { optimise as optimisePng } from '@jsquash/oxipng';
   }
 
   function renderRows() {
+    hideWarningTooltip();
     dom.exportTableBody.replaceChildren();
 
     if (!state.rows.length) {
@@ -3527,6 +3812,7 @@ import { optimise as optimisePng } from '@jsquash/oxipng';
   function renderFooter() {
     dom.footerStatus.replaceChildren();
     dom.footerStatus.hidden = true;
+    dom.footerStatus.className = 'footer-status';
 
     const counts = {
       queued: 0,
@@ -3569,7 +3855,13 @@ import { optimise as optimisePng } from '@jsquash/oxipng';
       if (state.isEstimating) parts.push('estimating');
     }
 
-    dom.footerMeta.textContent = parts.join(' • ');
+    const footerSummary = createNode('span', 'footer-meta-text', parts.join(' • '));
+    dom.footerMeta.replaceChildren(footerSummary);
+
+    if (state.footerNote) {
+      dom.footerStatus.textContent = state.footerNote;
+      dom.footerStatus.hidden = false;
+    }
   }
 
   function renderTopbar() {
@@ -3581,6 +3873,112 @@ import { optimise as optimisePng } from '@jsquash/oxipng';
       isSettingsView ? 'Back to export queue' : 'Open settings',
     );
     dom.settingsToggleButton.title = isSettingsView ? 'Back to export queue' : 'Open settings';
+  }
+
+  function lockExportButtonWidth() {
+    const hasRows = state.rows.length > 0;
+    const labels = [
+      hasRows ? `Export ${state.rows.length}` : 'Export',
+      ...EXPORT_BUTTON_BUSY_FRAMES.map((frame) => formatExportButtonBusyLabel(frame, 100)),
+    ];
+    const measuredWidth = labels.reduce(
+      (maxWidth, label) => Math.max(maxWidth, measureButtonLabelWidth(label)),
+      Math.ceil(dom.exportButton.getBoundingClientRect().width),
+    );
+    exportButtonLockedWidth = Math.ceil(measuredWidth);
+    dom.exportButton.style.width = `${exportButtonLockedWidth}px`;
+  }
+
+  function unlockExportButtonWidth() {
+    exportButtonLockedWidth = 0;
+    dom.exportButton.style.width = '';
+  }
+
+  function clampExportProgressPercent(completed, total) {
+    const safeTotal = Number(total) || 0;
+    if (safeTotal <= 0) {
+      return 0;
+    }
+
+    const safeCompleted = Math.max(0, Math.min(safeTotal, Number(completed) || 0));
+    return Math.round((safeCompleted / safeTotal) * 100);
+  }
+
+  function formatExportButtonBusyLabel(frame, percent) {
+    return `${frame} ${percent}%`;
+  }
+
+  function measureButtonLabelWidth(label) {
+    const probe = document.createElement('button');
+    probe.className = dom.exportButton.className;
+    probe.type = 'button';
+    probe.disabled = dom.exportButton.disabled;
+    probe.textContent = label;
+    probe.style.position = 'absolute';
+    probe.style.visibility = 'hidden';
+    probe.style.pointerEvents = 'none';
+    probe.style.left = '-9999px';
+    probe.style.top = '0';
+    probe.style.width = 'auto';
+    probe.style.minWidth = '0';
+    document.body.appendChild(probe);
+    const width = probe.getBoundingClientRect().width;
+    probe.remove();
+    return width;
+  }
+
+  function getExportButtonLabel(hasRows) {
+    if (state.isExporting) {
+      const frame = EXPORT_BUTTON_BUSY_FRAMES[
+        exportButtonAnimationIndex % EXPORT_BUTTON_BUSY_FRAMES.length
+      ];
+      const percent = clampExportProgressPercent(
+        state.exportProgress.completed,
+        state.exportProgress.total,
+      );
+      return formatExportButtonBusyLabel(frame, percent);
+    }
+
+    if (hasRows) {
+      return `Export ${state.rows.length}`;
+    }
+
+    return 'Export';
+  }
+
+  function updateExportButtonLabel() {
+    const hasRows = state.rows.length > 0;
+    dom.exportButton.textContent = getExportButtonLabel(hasRows);
+  }
+
+  function stopExportButtonAnimation() {
+    if (exportButtonAnimationTimer) {
+      window.clearInterval(exportButtonAnimationTimer);
+      exportButtonAnimationTimer = null;
+    }
+    exportButtonAnimationIndex = 0;
+    unlockExportButtonWidth();
+  }
+
+  function syncExportButtonAnimation() {
+    if (!state.isExporting) {
+      stopExportButtonAnimation();
+      return;
+    }
+
+    if (exportButtonAnimationTimer) {
+      return;
+    }
+
+    exportButtonAnimationTimer = window.setInterval(() => {
+      if (!state.isExporting) {
+        stopExportButtonAnimation();
+        return;
+      }
+
+      exportButtonAnimationIndex = (exportButtonAnimationIndex + 1) % EXPORT_BUTTON_BUSY_FRAMES.length;
+      updateExportButtonLabel();
+    }, EXPORT_BUTTON_BUSY_INTERVAL_MS);
   }
 
   function render() {
@@ -3595,11 +3993,9 @@ import { optimise as optimisePng } from '@jsquash/oxipng';
     dom.exportPanel.hidden = isSettingsView;
     dom.exportButton.hidden = isSettingsView;
     dom.exportButton.disabled = !hasRows || state.isExporting;
-    dom.exportButton.textContent = state.isExporting
-      ? `Exporting ${state.exportProgress.completed}/${state.exportProgress.total || 0}`
-      : hasRows
-        ? `Export ${state.rows.length}`
-        : 'Export';
+    dom.exportButton.style.width = exportButtonLockedWidth > 0 ? `${exportButtonLockedWidth}px` : '';
+    syncExportButtonAnimation();
+    updateExportButtonLabel();
 
     renderDefaultsControls();
     renderExportSettingsControls();
@@ -3694,6 +4090,10 @@ import { optimise as optimisePng } from '@jsquash/oxipng';
       return;
     }
 
+    lockExportButtonWidth();
+    state.isExporting = true;
+    render();
+
     sendPluginMessage({
       type: 'run-export',
       defaults: {
@@ -3743,7 +4143,11 @@ import { optimise as optimisePng } from '@jsquash/oxipng';
     });
 
     window.addEventListener('message', handleWindowMessage);
+    window.addEventListener('resize', repositionWarningTooltip);
+    document.addEventListener('scroll', repositionWarningTooltip, true);
     window.addEventListener('beforeunload', () => {
+      hideWarningTooltip();
+      stopExportButtonAnimation();
       Array.from(previewUrls.values()).forEach((url) => URL.revokeObjectURL(url));
       previewUrls.clear();
     });
