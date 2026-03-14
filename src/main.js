@@ -1,6 +1,9 @@
 import LibImageQuant from '@fe-daily/libimagequant-wasm';
 import * as wasmModuleNamespace from '@fe-daily/libimagequant-wasm/wasm/libimagequant_wasm.js';
 import initOxipng, { optimise as optimisePngSync } from '@jsquash/oxipng/codec/pkg/squoosh_oxipng.js';
+import {
+  OPEN_SOURCE_LIBRARIES,
+} from './open-source-libraries.js';
 import RasterExportWorker from './raster-export-worker.js?worker&inline';
 
 (function () {
@@ -368,6 +371,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     { value: 'defaults', label: 'Defaults' },
     { value: 'export', label: 'Export' },
     { value: 'data', label: 'Data' },
+    { value: 'libraries', label: 'Libraries' },
   ];
   const EXPORT_BUTTON_BUSY_FRAMES = [
     '✱', '✲', '✳', '✴', '✳', '✲', '✱', '✲', '✳', '✴', '✳', '✲',
@@ -469,10 +473,12 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     defaultsSection: document.getElementById('defaultsSection'),
     exportSettingsSection: document.getElementById('exportSettingsSection'),
     settingsDataSection: document.getElementById('settingsDataSection'),
+    openSourceSection: document.getElementById('openSourceSection'),
     presetEditorSection: document.getElementById('presetEditorSection'),
     defaultsControls: document.getElementById('defaultsControls'),
     exportSettingsControls: document.getElementById('exportSettingsControls'),
     settingsDataControls: document.getElementById('settingsDataControls'),
+    openSourceControls: document.getElementById('openSourceControls'),
     settingsImportInput: document.getElementById('settingsImportInput'),
     presetSettingsControls: document.getElementById('presetSettingsControls'),
     exportTableBody: document.getElementById('exportTableBody'),
@@ -681,6 +687,14 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     return node;
   }
 
+  function createExternalLink(label, href) {
+    const link = createNode('a', 'library-link', label);
+    link.href = href;
+    link.target = '_blank';
+    link.rel = 'noreferrer noopener';
+    return link;
+  }
+
   function createChevronIcon() {
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     svg.setAttribute('viewBox', '0 0 10 6');
@@ -746,15 +760,19 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
   }
 
   function getSettingsNavItems() {
-    const generalTabs = SETTINGS_GENERAL_TABS.filter((tab) => tab.value !== 'data');
-    const dataTab = SETTINGS_GENERAL_TABS.find((tab) => tab.value === 'data');
+    const leadingTabs = SETTINGS_GENERAL_TABS.filter((tab) => (
+      tab.value === 'defaults' || tab.value === 'export'
+    ));
+    const trailingTabs = SETTINGS_GENERAL_TABS.filter((tab) => (
+      tab.value !== 'defaults' && tab.value !== 'export'
+    ));
     return [
-      ...generalTabs,
+      ...leadingTabs,
       ...FORMAT_OPTIONS.map((option) => ({
         value: option.value,
         label: option.label,
       })),
-      ...(dataTab ? [dataTab] : []),
+      ...trailingTabs,
     ];
   }
 
@@ -2825,6 +2843,48 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     return card;
   }
 
+  function createOpenSourceLibraryCard(library) {
+    const card = createNode('article', 'setting-card library-card');
+    const head = createNode('div', 'library-card-head');
+    const titleRow = createNode('div', 'library-title-row');
+    const title = createNode('strong', 'library-card-title', library.name);
+    const version = createNode('span', 'library-card-version', `v${library.version}`);
+    const licenseBadge = createNode('span', 'library-license-badge', library.license);
+
+    titleRow.append(title, version);
+    head.append(titleRow, licenseBadge);
+    card.append(head);
+
+    if (library.description) {
+      card.append(createNode('p', 'inline-note library-inline-note', library.description));
+    }
+
+    const metaRow = createNode('div', 'library-meta-row');
+    const noticeLabel = createNode(
+      'span',
+      'library-meta-chip',
+      library.noticeFiles.length
+        ? `Notice files: ${library.noticeFiles.join(', ')}`
+        : 'No embedded LICENSE file found',
+    );
+    metaRow.append(noticeLabel);
+    card.append(metaRow);
+
+    const linkRow = createNode('div', 'library-link-row');
+    linkRow.append(createExternalLink('npm', library.packageUrl));
+
+    if (library.repositoryUrl) {
+      linkRow.append(createExternalLink('Repository', library.repositoryUrl));
+    }
+
+    if (library.homepageUrl && library.homepageUrl !== library.repositoryUrl) {
+      linkRow.append(createExternalLink('Homepage', library.homepageUrl));
+    }
+
+    card.append(linkRow);
+    return card;
+  }
+
   function createPresetToggleControl(label, checked, onChange, disabled) {
     const control = createNode('div', 'preset-control toggle');
     const row = createNode('div', 'toggle-row');
@@ -2959,6 +3019,12 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     dom.settingsDataControls.replaceChildren(createActionCard());
   }
 
+  function renderOpenSourceControls() {
+    dom.openSourceControls.replaceChildren(
+      ...OPEN_SOURCE_LIBRARIES.map((library) => createOpenSourceLibraryCard(library)),
+    );
+  }
+
   function getActivePresetSettingsFormat() {
     if (isPresetSettingsTab(state.settingsTab)) {
       return normalizeFormat(state.settingsTab);
@@ -2996,6 +3062,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     dom.defaultsSection.hidden = activeTab !== 'defaults';
     dom.exportSettingsSection.hidden = activeTab !== 'export';
     dom.settingsDataSection.hidden = activeTab !== 'data';
+    dom.openSourceSection.hidden = activeTab !== 'libraries';
     dom.presetEditorSection.hidden = !isPresetSettingsTab(activeTab);
   }
 
@@ -4000,6 +4067,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     renderDefaultsControls();
     renderExportSettingsControls();
     renderSettingsDataControls();
+    renderOpenSourceControls();
     renderSettingsNavTabs();
     renderSettingsSectionVisibility();
     renderPresetSettingsControls();

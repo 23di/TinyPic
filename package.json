@@ -6,6 +6,7 @@
     "build": "node scripts/build.mjs",
     "check": "node --check scripts/build.mjs && node --experimental-default-type=module --check src/code.js && node --experimental-default-type=module --check src/main.js && node --experimental-default-type=module --check src/raster-export-worker.js",
     "dev": "vite",
+    "licenses": "node scripts/generate-third-party-licenses.mjs",
     "preview": "vite preview --outDir dist --port 4173"
   },
   "author": "",

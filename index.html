@@ -456,6 +456,10 @@
       flex-wrap: nowrap;
     }
 
+    #openSourceSection .settings-controls {
+      grid-template-columns: 1fr;
+    }
+
     .preset-card-grid {
       grid-template-columns: 1fr;
     }
@@ -605,6 +609,84 @@
       display: flex;
       flex-wrap: wrap;
       gap: 8px;
+    }
+
+    .open-source-summary-card,
+    .library-card {
+      min-width: 0;
+    }
+
+    .library-card {
+      gap: 10px;
+    }
+
+    .library-card-head,
+    .library-title-row,
+    .library-meta-row,
+    .library-link-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .library-card-head {
+      justify-content: space-between;
+      align-items: flex-start;
+    }
+
+    .library-title-row {
+      min-width: 0;
+    }
+
+    .library-card-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text);
+    }
+
+    .library-card-version,
+    .library-inline-note {
+      margin: 0;
+    }
+
+    .library-card-version {
+      font: 12px/1.4 SFMono-Regular, Menlo, monospace;
+      color: var(--muted);
+    }
+
+    .library-license-badge,
+    .library-meta-chip,
+    .library-link {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      padding: 0 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--panel-strong);
+      font-size: 12px;
+      line-height: 1.4;
+    }
+
+    .library-license-badge {
+      border-color: var(--accent-soft);
+      background: var(--accent-soft);
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    .library-link {
+      color: var(--text);
+      text-decoration: none;
+      transition: border-color 120ms ease, background-color 120ms ease, color 120ms ease;
+    }
+
+    .library-link:hover,
+    .library-link:focus-visible {
+      border-color: var(--line-hover);
+      background: var(--figma-color-bg-hover, var(--accent-soft));
+      outline: none;
     }
 
     .preset-editor {
@@ -1463,6 +1545,10 @@
 
           <article class="settings-section preset-editor" id="presetEditorSection" hidden>
             <div class="preset-card-grid" id="presetSettingsControls"></div>
+          </article>
+
+          <article class="settings-section" id="openSourceSection" hidden>
+            <div class="settings-controls" id="openSourceControls"></div>
           </article>
         </div>
       </div>
