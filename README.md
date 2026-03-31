@@ -5,7 +5,7 @@ Figma plugin for compressing and exporting selected frames as PNG, JPG, WebP, SV
 ## Features
 
 - Batch export multiple frames at once
-- Per-format compression presets (PNG quantization, JPG quality, SVG optimization)
+- Per-format compression presets (PNG quantization, JPG quality, WebP quality/lossless, SVG optimization)
 - Adjustable export scales
 - Customizable filename templates with tokens (name, page, scale, dimensions, date)
 - Folder structure preserved from frame names (e.g. `section/icon`)
@@ -56,6 +56,7 @@ publish/          — Community listing metadata
 
 - [libimagequant-wasm](https://github.com/nicolo-ribaudo/libimagequant-wasm) — PNG color quantization
 - [oxipng](https://github.com/nicolo-ribaudo/oxipng-wasm) — PNG optimization
+- [jSquash WebP](https://github.com/jamsinclair/jSquash) — WebP encoding
 - [SVGO](https://github.com/nicolo-ribaudo/svgo) — SVG optimization
 - [Vite](https://vitejs.dev/) — UI bundling with WASM support
 

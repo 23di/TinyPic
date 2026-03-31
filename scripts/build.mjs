@@ -30,7 +30,12 @@ async function bundleUiScript() {
     root: rootDir,
     plugins: [wasm(), topLevelAwait()],
     worker: {
-      format: 'iife',
+      format: 'es',
+      rollupOptions: {
+        output: {
+          inlineDynamicImports: true,
+        },
+      },
     },
     logLevel: 'warn',
     build: {

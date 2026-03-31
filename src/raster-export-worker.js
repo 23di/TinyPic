@@ -1,9 +1,15 @@
 import LibImageQuant from '@fe-daily/libimagequant-wasm';
 import * as wasmModuleNamespace from '@fe-daily/libimagequant-wasm/wasm/libimagequant_wasm.js';
 import initOxipng, { optimise as optimisePngSync } from '@jsquash/oxipng/codec/pkg/squoosh_oxipng.js';
+import { encode as encodeWebp } from '@jsquash/webp';
 
 let pngQuantizer = null;
 let oxipngInitPromise = null;
+const WEBP_FIXED_ENCODER_OPTIONS = Object.freeze({
+  method: 4,
+  alpha_quality: 100,
+  alpha_compression: 1,
+});
 
 function toUint8Array(value) {
   if (value instanceof Uint8Array) {
@@ -132,6 +138,18 @@ async function canvasToBytes(canvas, mimeType, quality) {
   return new Uint8Array(await blob.arrayBuffer());
 }
 
+function buildWebpEncodeOptions(presetSettings) {
+  const quality = Math.round(Number(presetSettings.quality));
+  const normalizedQuality = Number.isFinite(quality)
+    ? Math.max(0, Math.min(100, quality))
+    : 74;
+  return {
+    ...WEBP_FIXED_ENCODER_OPTIONS,
+    quality: normalizedQuality,
+    lossless: presetSettings.lossless ? 1 : 0,
+  };
+}
+
 async function preparePngPayload(sourceBytes, sourceMimeType, presetSettings) {
   const shouldQuantize = Boolean(presetSettings.quantizeEnabled);
   const keepAlpha = presetSettings.alphaEnabled !== false;
@@ -191,6 +209,20 @@ async function prepareJpgPayload(sourceBytes, sourceMimeType, presetSettings) {
   }
 }
 
+async function prepareWebpPayload(sourceBytes, sourceMimeType, presetSettings) {
+  const source = await loadRasterSource(sourceBytes, sourceMimeType || 'image/png');
+  try {
+    const { canvas, ctx } = createRasterCanvas(source, false);
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    return {
+      bytes: new Uint8Array(await encodeWebp(imageData, buildWebpEncodeOptions(presetSettings))),
+      mimeType: 'image/webp',
+    };
+  } finally {
+    source.dispose();
+  }
+}
+
 async function processRasterRequest(message) {
   const sourceBytes = toUint8Array(message.bytes);
   if (!sourceBytes.byteLength) {
@@ -207,6 +239,14 @@ async function processRasterRequest(message) {
 
   if (message.format === 'JPG') {
     return prepareJpgPayload(
+      sourceBytes,
+      message.sourceMimeType || 'image/png',
+      message.presetSettings || {},
+    );
+  }
+
+  if (message.format === 'WEBP') {
+    return prepareWebpPayload(
       sourceBytes,
       message.sourceMimeType || 'image/png',
       message.presetSettings || {},

@@ -9,6 +9,7 @@ const SCALE_OPTIONS = [0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4];
 const FORMAT_META = {
   PNG: { extension: 'png', mimeType: 'image/png', vector: false },
   JPG: { extension: 'jpg', mimeType: 'image/jpeg', vector: false },
+  WEBP: { extension: 'webp', mimeType: 'image/webp', vector: false },
   SVG: { extension: 'svg', mimeType: 'image/svg+xml', vector: true },
   PDF: { extension: 'pdf', mimeType: 'application/pdf', vector: true },
 };
@@ -207,6 +208,12 @@ const PRESET_DEFINITIONS = {
     { value: 'web-jpg', settings: { quality: 74 } },
     { value: 'preview-jpg', settings: { quality: 62 } },
   ],
+  WEBP: [
+    { value: 'lossless-webp', settings: { quality: 100, lossless: true } },
+    { value: 'balanced-webp', settings: { quality: 84, lossless: false } },
+    { value: 'web-webp', settings: { quality: 74, lossless: false } },
+    { value: 'preview-webp', settings: { quality: 62, lossless: false } },
+  ],
   SVG: [
     {
       value: 'editable-svg',
@@ -285,6 +292,7 @@ const MAX_UI_HEIGHT = 1200;
 const DEFAULT_PRESET_BY_FORMAT = {
   PNG: 'web',
   JPG: 'web-jpg',
+  WEBP: 'web-webp',
   SVG: 'clean-svg',
   PDF: 'document-pdf',
 };
@@ -335,7 +343,9 @@ let uiIsReady = false;
 let selectionVersion = 0;
 let latestEstimateRequestId = 0;
 let exportSessionSeed = 0;
+let rasterEstimateRequestSeed = 0;
 let activeExportSession = null;
+const pendingRasterEstimateRequests = new Map();
 let latestStoredState = normalizeState(DEFAULT_STATE);
 let currentUiSize = {
   width: DEFAULT_UI_WIDTH,
@@ -390,6 +400,9 @@ figma.ui.onmessage = async (message) => {
       break;
     case 'export-file-ack':
       handleExportFileAck(message);
+      break;
+    case 'estimate-raster-result':
+      handleRasterEstimateResult(message);
       break;
     default:
       break;
@@ -647,6 +660,22 @@ function normalizePresetSettingValue(format, key, value, fallbackValue) {
         return JPG_QUALITY_OPTIONS.has(fallbackParsed) ? fallbackParsed : 84;
       }
       break;
+    case 'WEBP':
+      if (key === 'quality') {
+        const parsed = Math.round(Number(value));
+        if (parsed === 100 || JPG_QUALITY_OPTIONS.has(parsed)) {
+          return parsed;
+        }
+        const fallbackParsed = Math.round(Number(fallbackValue));
+        if (fallbackParsed === 100 || JPG_QUALITY_OPTIONS.has(fallbackParsed)) {
+          return fallbackParsed;
+        }
+        return 74;
+      }
+      if (key === 'lossless') {
+        return Boolean(value);
+      }
+      break;
     case 'SVG':
       if (
         key === 'svgOutlineText'
@@ -891,8 +920,128 @@ function buildRasterSourceSettings(scale) {
   };
 }
 
+function isOriginalFilesPreset(row) {
+  return Boolean(row && row.format === 'PNG' && row.preset === 'original');
+}
+
+function matchesSignature(bytes, signature, offset = 0) {
+  if (!(bytes instanceof Uint8Array) || bytes.length < offset + signature.length) {
+    return false;
+  }
+
+  for (let i = 0; i < signature.length; i += 1) {
+    if (bytes[offset + i] !== signature[i]) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function sniffOriginalFileType(bytes) {
+  const safeBytes = assertExportBytes(bytes);
+
+  if (matchesSignature(safeBytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) {
+    return { extension: 'png', mimeType: 'image/png' };
+  }
+
+  if (matchesSignature(safeBytes, [0xff, 0xd8, 0xff])) {
+    return { extension: 'jpg', mimeType: 'image/jpeg' };
+  }
+
+  if (
+    matchesSignature(safeBytes, [0x47, 0x49, 0x46, 0x38, 0x37, 0x61])
+    || matchesSignature(safeBytes, [0x47, 0x49, 0x46, 0x38, 0x39, 0x61])
+  ) {
+    return { extension: 'gif', mimeType: 'image/gif' };
+  }
+
+  if (
+    matchesSignature(safeBytes, [0x52, 0x49, 0x46, 0x46])
+    && matchesSignature(safeBytes, [0x57, 0x45, 0x42, 0x50], 8)
+  ) {
+    return { extension: 'webp', mimeType: 'image/webp' };
+  }
+
+  if (matchesSignature(safeBytes, [0x42, 0x4d])) {
+    return { extension: 'bmp', mimeType: 'image/bmp' };
+  }
+
+  if (
+    matchesSignature(safeBytes, [0x49, 0x49, 0x2a, 0x00])
+    || matchesSignature(safeBytes, [0x4d, 0x4d, 0x00, 0x2a])
+  ) {
+    return { extension: 'tif', mimeType: 'image/tiff' };
+  }
+
+  const header = decodeUtf8Bytes(safeBytes.subarray(0, Math.min(safeBytes.length, 512))).trimStart();
+  if (header.startsWith('<svg') || (header.startsWith('<?xml') && header.includes('<svg'))) {
+    return { extension: 'svg', mimeType: 'image/svg+xml' };
+  }
+
+  return { extension: 'bin', mimeType: 'application/octet-stream' };
+}
+
+function collectImageHashesFromNode(node, hashes, visited) {
+  if (!node || !hashes || !visited) {
+    return;
+  }
+
+  if (visited.has(node.id) || ('visible' in node && node.visible === false)) {
+    return;
+  }
+  visited.add(node.id);
+
+  if ('fills' in node && Array.isArray(node.fills)) {
+    for (const paint of node.fills) {
+      if (
+        paint
+        && paint.type === 'IMAGE'
+        && paint.visible !== false
+        && typeof paint.imageHash === 'string'
+        && paint.imageHash
+      ) {
+        hashes.add(paint.imageHash);
+      }
+    }
+  }
+
+  if ('children' in node && Array.isArray(node.children)) {
+    for (const child of node.children) {
+      collectImageHashesFromNode(child, hashes, visited);
+    }
+  }
+}
+
+async function extractOriginalFileAsset(node) {
+  const hashes = new Set();
+  collectImageHashesFromNode(node, hashes, new Set());
+
+  if (hashes.size !== 1) {
+    return null;
+  }
+
+  if (typeof figma.getImageByHash !== 'function') {
+    return null;
+  }
+
+  const [imageHash] = Array.from(hashes);
+  const image = figma.getImageByHash(imageHash);
+  if (!image || typeof image.getBytesAsync !== 'function') {
+    return null;
+  }
+
+  const bytes = assertExportBytes(await image.getBytesAsync());
+  const fileType = sniffOriginalFileType(bytes);
+  return {
+    bytes,
+    extension: fileType.extension,
+    mimeType: fileType.mimeType,
+  };
+}
+
 function buildEstimateSettings(row, presetSettings) {
-  if (row.format === 'PNG') {
+  if (row.format === 'PNG' || row.format === 'WEBP') {
     return buildRasterSourceSettings(row.scale);
   }
 
@@ -924,7 +1073,7 @@ function buildEstimateSettings(row, presetSettings) {
 }
 
 function buildExportSourceSettings(row, presetSettings) {
-  if (row.format === 'PNG' || row.format === 'JPG') {
+  if (row.format === 'PNG' || row.format === 'JPG' || row.format === 'WEBP') {
     return buildRasterSourceSettings(row.scale);
   }
 
@@ -1086,8 +1235,9 @@ function normalizeNameTemplate(tokens) {
   return normalized.length > 0 ? normalized : DEFAULT_NAME_TEMPLATE.map((t) => ({ ...t }));
 }
 
-function evaluateNameTemplate(nodeSummary, format, scale, template, date) {
+function evaluateNameTemplate(nodeSummary, format, scale, template, date, options = {}) {
   const d = date instanceof Date ? date : new Date();
+  const ignoreScale = Boolean(options.ignoreScale);
   let result = '';
   for (const token of template) {
     if (token.type === 'text') {
@@ -1101,7 +1251,7 @@ function evaluateNameTemplate(nodeSummary, format, scale, template, date) {
           result += sanitizeVarValue(nodeSummary.pageName || '');
           break;
         case 'scale':
-          if (!isVectorFormat(format)) {
+          if (!ignoreScale && !isVectorFormat(format)) {
             result += formatScale(scale);
           }
           break;
@@ -1123,16 +1273,49 @@ function evaluateNameTemplate(nodeSummary, format, scale, template, date) {
   return result;
 }
 
-function buildFileName(nodeSummary, format, scale, settings) {
+function sanitizeFileExtension(value) {
+  const normalized = String(value || 'bin')
+    .trim()
+    .replace(/^\.+/, '')
+    .toLowerCase();
+  return normalized.replace(/[^a-z0-9]+/g, '') || 'bin';
+}
+
+function buildFileNameWithExtension(nodeSummary, extension, settings, options = {}) {
   const template = Array.isArray(settings.nameTemplate)
     ? normalizeNameTemplate(settings.nameTemplate)
     : DEFAULT_NAME_TEMPLATE.map((t) => ({ ...t }));
   const preserveFolders = settings.preserveFolderStructure !== false;
   const path = normalizeExportPath(
-    evaluateNameTemplate(nodeSummary, format, scale, template, new Date()),
+    evaluateNameTemplate(
+      nodeSummary,
+      options.format || 'PNG',
+      options.scale !== undefined ? options.scale : 1,
+      template,
+      new Date(),
+      options,
+    ),
     preserveFolders,
   );
-  return `${path}.${FORMAT_META[format].extension}`;
+  return `${path}.${sanitizeFileExtension(extension)}`;
+}
+
+function buildFileName(nodeSummary, format, scale, settings) {
+  return buildFileNameWithExtension(
+    nodeSummary,
+    FORMAT_META[format].extension,
+    settings,
+    { format, scale },
+  );
+}
+
+function buildOriginalFileName(nodeSummary, extension, settings) {
+  return buildFileNameWithExtension(
+    nodeSummary,
+    extension,
+    settings,
+    { format: 'PNG', scale: 1, ignoreScale: true },
+  );
 }
 
 function normalizeRow(row, defaults) {
@@ -1249,20 +1432,48 @@ async function handleEstimateRequest(message) {
     let bytes = null;
     let baselineBytes = null;
 
-    try {
-      const currentBytes = await node.exportAsync(buildEstimateSettings(row, presetSettings));
-      if (requestId !== latestEstimateRequestId) {
-        return;
+    if (isOriginalFilesPreset(row)) {
+      try {
+        const originalAsset = await extractOriginalFileAsset(node);
+        if (requestId !== latestEstimateRequestId) {
+          return;
+        }
+        if (originalAsset) {
+          bytes = originalAsset.bytes.byteLength;
+          baselineBytes = originalAsset.bytes.byteLength;
+        }
+      } catch (error) {
+        bytes = null;
+        baselineBytes = null;
       }
-      const safeCurrentBytes = assertExportBytes(currentBytes);
-      if (row.format === 'SVG') {
-        baselineBytes = safeCurrentBytes.byteLength;
-        bytes = optimiseSvgBytes(safeCurrentBytes, presetSettings).byteLength;
-      } else {
-        bytes = safeCurrentBytes.byteLength;
+    }
+
+    if (bytes === null) {
+      try {
+        const currentBytes = await node.exportAsync(buildEstimateSettings(row, presetSettings));
+        if (requestId !== latestEstimateRequestId) {
+          return;
+        }
+        const safeCurrentBytes = assertExportBytes(currentBytes);
+        if (row.format === 'WEBP') {
+          bytes = await requestRasterEstimateBytes(
+            safeCurrentBytes,
+            row.format,
+            getSourceMimeType(row),
+            presetSettings,
+          );
+          if (requestId !== latestEstimateRequestId) {
+            return;
+          }
+        } else if (row.format === 'SVG') {
+          baselineBytes = safeCurrentBytes.byteLength;
+          bytes = optimiseSvgBytes(safeCurrentBytes, presetSettings).byteLength;
+        } else {
+          bytes = safeCurrentBytes.byteLength;
+        }
+      } catch (error) {
+        bytes = null;
       }
-    } catch (error) {
-      bytes = null;
     }
 
     try {
@@ -1281,7 +1492,18 @@ async function handleEstimateRequest(message) {
         if (requestId !== latestEstimateRequestId) {
           return;
         }
-        baselineBytes = assertExportBytes(baselineBuffer).byteLength;
+        const safeBaselineBytes = assertExportBytes(baselineBuffer);
+        baselineBytes = row.format === 'WEBP'
+          ? await requestRasterEstimateBytes(
+            safeBaselineBytes,
+            row.format,
+            getSourceMimeType(row),
+            presetSettings,
+          )
+          : safeBaselineBytes.byteLength;
+        if (requestId !== latestEstimateRequestId) {
+          return;
+        }
       }
     } catch (error) {
       baselineBytes = null;
@@ -1359,6 +1581,28 @@ function handleExportFileAck(message) {
   });
 }
 
+function handleRasterEstimateResult(message) {
+  if (!message.requestId) {
+    return;
+  }
+
+  const resolve = pendingRasterEstimateRequests.get(message.requestId);
+  if (!resolve) {
+    return;
+  }
+
+  resolve({
+    ok: Boolean(message.ok),
+    detail: typeof message.detail === 'string' ? message.detail : '',
+    bytesLength: typeof message.bytesLength === 'number' ? message.bytesLength : undefined,
+  });
+}
+
+function createRasterEstimateId() {
+  rasterEstimateRequestSeed += 1;
+  return `estimate-${Date.now()}-${rasterEstimateRequestSeed}`;
+}
+
 function createDeliveryId(session) {
   session.deliverySeed += 1;
   return `${session.id}-file-${session.deliverySeed}`;
@@ -1386,6 +1630,47 @@ async function waitForFileAck(session, deliveryId, timeoutMs) {
       resolve(result);
     });
   });
+}
+
+async function requestRasterEstimateBytes(bytes, format, sourceMimeType, presetSettings, timeoutMs = 12000) {
+  const requestId = createRasterEstimateId();
+  const sourceBytes = assertExportBytes(bytes);
+  const timeout = Number.isFinite(timeoutMs) ? timeoutMs : 12000;
+
+  const result = await new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      pendingRasterEstimateRequests.delete(requestId);
+      resolve({
+        ok: false,
+        detail: 'UI did not return a WebP estimate in time.',
+      });
+    }, timeout);
+
+    pendingRasterEstimateRequests.set(requestId, (response) => {
+      clearTimeout(timer);
+      pendingRasterEstimateRequests.delete(requestId);
+      resolve(response);
+    });
+
+    postToUI({
+      type: 'estimate-raster',
+      requestId,
+      format,
+      sourceMimeType: sourceMimeType || 'image/png',
+      presetSettings,
+      bytes: sourceBytes,
+    });
+  });
+
+  if (!result.ok) {
+    throw new Error(result.detail || 'Raster estimate failed.');
+  }
+
+  if (typeof result.bytesLength !== 'number') {
+    throw new Error('Raster estimate did not return a byte length.');
+  }
+
+  return result.bytesLength;
 }
 
 function normalizeExportBytes(bytes) {
@@ -1533,7 +1818,7 @@ function delay(ms) {
 }
 
 function getSourceMimeType(row) {
-  if (row.format === 'PNG' || row.format === 'JPG') {
+  if (row.format === 'PNG' || row.format === 'JPG' || row.format === 'WEBP') {
     return 'image/png';
   }
   return FORMAT_META[row.format].mimeType;
@@ -1615,8 +1900,20 @@ async function handleExport(message) {
     }
 
     const summary = toNodeSummary(node);
-    const fileName = buildFileName(summary, row.format, row.scale, normalized.settings);
     const presetSettings = getPresetSettings(presetSettingsState, row.format, row.preset);
+    let originalAsset = null;
+
+    if (isOriginalFilesPreset(row)) {
+      try {
+        originalAsset = await extractOriginalFileAsset(node);
+      } catch (error) {
+        originalAsset = null;
+      }
+    }
+
+    const fileName = originalAsset
+      ? buildOriginalFileName(summary, originalAsset.extension, normalized.settings)
+      : buildFileName(summary, row.format, row.scale, normalized.settings);
 
     postToUI({
       type: 'export-row-status',
@@ -1627,12 +1924,20 @@ async function handleExport(message) {
     });
 
     try {
-      const rawBytes = await node.exportAsync(buildExportSourceSettings(row, presetSettings));
+      const rawBytes = originalAsset
+        ? originalAsset.bytes
+        : await node.exportAsync(buildExportSourceSettings(row, presetSettings));
       const exportedBytes = assertExportBytes(rawBytes);
-      const baselineBytes = row.format === 'SVG' ? exportedBytes.byteLength : undefined;
-      const bytes = row.format === 'SVG'
-        ? optimiseSvgBytes(exportedBytes, presetSettings, fileName)
-        : exportedBytes;
+      const baselineBytes = originalAsset
+        ? exportedBytes.byteLength
+        : row.format === 'SVG'
+          ? exportedBytes.byteLength
+          : undefined;
+      const bytes = originalAsset
+        ? exportedBytes
+        : row.format === 'SVG'
+          ? optimiseSvgBytes(exportedBytes, presetSettings, fileName)
+          : exportedBytes;
       const deliveryId = createDeliveryId(session);
 
       postToUI({
@@ -1644,8 +1949,9 @@ async function handleExport(message) {
         preset: row.preset,
         scale: row.scale,
         fileName,
-        mimeType: FORMAT_META[row.format].mimeType,
-        sourceMimeType: getSourceMimeType(row),
+        mimeType: originalAsset ? originalAsset.mimeType : FORMAT_META[row.format].mimeType,
+        sourceMimeType: originalAsset ? originalAsset.mimeType : getSourceMimeType(row),
+        skipProcessing: Boolean(originalAsset),
         bytes,
         baselineBytes,
       });

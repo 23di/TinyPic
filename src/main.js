@@ -1,6 +1,7 @@
 import LibImageQuant from '@fe-daily/libimagequant-wasm';
 import * as wasmModuleNamespace from '@fe-daily/libimagequant-wasm/wasm/libimagequant_wasm.js';
 import initOxipng, { optimise as optimisePngSync } from '@jsquash/oxipng/codec/pkg/squoosh_oxipng.js';
+import { encode as encodeWebp } from '@jsquash/webp';
 import {
   OPEN_SOURCE_LIBRARIES,
 } from './open-source-libraries.js';
@@ -10,6 +11,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
   const FORMAT_OPTIONS = [
     { value: 'PNG', label: 'PNG' },
     { value: 'JPG', label: 'JPG' },
+    { value: 'WEBP', label: 'WebP' },
     { value: 'SVG', label: 'SVG' },
     { value: 'PDF', label: 'PDF' },
   ];
@@ -134,8 +136,8 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     PNG: [
       {
         value: 'original',
-        label: 'Original',
-        hint: 'Raw Figma PNG with no post-processing.',
+        label: 'Original files',
+        hint: 'Downloads the original Figma file without resizing or post-processing when a single source asset is found.',
         settings: {
           alphaEnabled: true,
           quantizeEnabled: false,
@@ -219,6 +221,44 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       { value: 'web-jpg', label: 'Web', settings: { quality: 74 } },
       { value: 'preview-jpg', label: 'Preview', settings: { quality: 62 } },
     ],
+    WEBP: [
+      {
+        value: 'lossless-webp',
+        label: 'Lossless',
+        hint: 'True lossless WebP with preserved transparency.',
+        settings: {
+          quality: 100,
+          lossless: true,
+        },
+      },
+      {
+        value: 'balanced-webp',
+        label: 'Balanced',
+        hint: 'Balanced WebP for general-purpose delivery.',
+        settings: {
+          quality: 84,
+          lossless: false,
+        },
+      },
+      {
+        value: 'web-webp',
+        label: 'Web',
+        hint: 'Smaller WebP tuned for typical web usage.',
+        settings: {
+          quality: 74,
+          lossless: false,
+        },
+      },
+      {
+        value: 'preview-webp',
+        label: 'Preview',
+        hint: 'Aggressive lossy WebP for previews and quick sharing.',
+        settings: {
+          quality: 62,
+          lossless: false,
+        },
+      },
+    ],
     SVG: [
       {
         value: 'editable-svg',
@@ -298,9 +338,15 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
   const PNG_QUALITY_OPTIONS = [100, 98, 95, 92, 88, 84, 78, 72, 64, 56];
   const PNG_DITHERING_OPTIONS = [0, 0.15, 0.35, 0.65, 1];
   const JPG_QUALITY_OPTIONS = [96, 92, 88, 84, 78, 74, 68, 62, 56];
+  const WEBP_FIXED_ENCODER_OPTIONS = Object.freeze({
+    method: 4,
+    alpha_quality: 100,
+    alpha_compression: 1,
+  });
   const DEFAULT_PRESET_BY_FORMAT = {
     PNG: 'web',
     JPG: 'web-jpg',
+    WEBP: 'web-webp',
     SVG: 'clean-svg',
     PDF: 'document-pdf',
   };
@@ -930,6 +976,22 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
           return JPG_QUALITY_OPTIONS.includes(fallbackParsed) ? fallbackParsed : 84;
         }
         break;
+      case 'WEBP':
+        if (key === 'quality') {
+          const parsed = Math.round(Number(value));
+          if (parsed === 100 || JPG_QUALITY_OPTIONS.includes(parsed)) {
+            return parsed;
+          }
+          const fallbackParsed = Math.round(Number(fallbackValue));
+          if (fallbackParsed === 100 || JPG_QUALITY_OPTIONS.includes(fallbackParsed)) {
+            return fallbackParsed;
+          }
+          return 74;
+        }
+        if (key === 'lossless') {
+          return Boolean(value);
+        }
+        break;
       case 'SVG':
         if (
           key === 'svgOutlineText'
@@ -1410,6 +1472,8 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     switch (format) {
       case 'JPG':
         return 'jpg';
+      case 'WEBP':
+        return 'webp';
       case 'SVG':
         return 'svg';
       case 'PDF':
@@ -1945,6 +2009,18 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     });
   }
 
+  function buildWebpEncodeOptions(presetSettings) {
+    const quality = Math.round(Number(presetSettings.quality));
+    const normalizedQuality = Number.isFinite(quality)
+      ? Math.max(0, Math.min(100, quality))
+      : 74;
+    return {
+      ...WEBP_FIXED_ENCODER_OPTIONS,
+      quality: normalizedQuality,
+      lossless: presetSettings.lossless ? 1 : 0,
+    };
+  }
+
   function downloadBlob(fileName, blob) {
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -2136,6 +2212,21 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     }
   }
 
+  async function prepareWebpPayload(sourceBytes, sourceMimeType, presetSettings) {
+    const source = await loadRasterSource(sourceBytes, sourceMimeType || 'image/png');
+    try {
+      const { canvas, ctx } = createRasterCanvas(source, false);
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const encoded = await encodeWebp(imageData, buildWebpEncodeOptions(presetSettings));
+      return {
+        bytes: new Uint8Array(encoded),
+        mimeType: 'image/webp',
+      };
+    } finally {
+      source.dispose();
+    }
+  }
+
   async function prepareRasterPayloadInWorker(message, presetSettings) {
     const requestId = `raster-${++rasterExportRequestSeed}`;
     const sourceBytes = toUint8Array(message.bytes);
@@ -2175,7 +2266,14 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       throw new Error('UI received an empty file payload.');
     }
 
-    if (message.format !== 'PNG' && message.format !== 'JPG') {
+    if (message.skipProcessing) {
+      return {
+        bytes: sourceBytes,
+        mimeType: message.mimeType || message.sourceMimeType || 'application/octet-stream',
+      };
+    }
+
+    if (message.format !== 'PNG' && message.format !== 'JPG' && message.format !== 'WEBP') {
       return {
         bytes: sourceBytes,
         mimeType: message.mimeType || message.sourceMimeType || 'application/octet-stream',
@@ -2191,6 +2289,14 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
 
     if (message.format === 'PNG') {
       return preparePngPayload(
+        sourceBytes,
+        message.sourceMimeType || 'image/png',
+        presetSettings,
+      );
+    }
+
+    if (message.format === 'WEBP') {
+      return prepareWebpPayload(
         sourceBytes,
         message.sourceMimeType || 'image/png',
         presetSettings,
@@ -2217,6 +2323,14 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     } finally {
       source.dispose();
     }
+  }
+
+  async function estimateRasterPayload(message) {
+    const payload = await prepareDownloadPayload(message);
+    return {
+      ok: true,
+      bytesLength: payload.bytes.byteLength,
+    };
   }
 
   async function queueDownload(message) {
@@ -3176,6 +3290,25 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
           controlsDisabled,
         ),
       );
+    } else if (format === 'WEBP') {
+      const qualityControlDisabled = controlsDisabled || Boolean(presetSettings.lossless);
+      controlGrid.appendChild(
+        createPresetToggleControl(
+          'Lossless',
+          Boolean(presetSettings.lossless),
+          (checked) => updatePresetSetting(format, definition.value, 'lossless', checked),
+          controlsDisabled,
+        ),
+      );
+      controlGrid.appendChild(
+        createPresetSelectControl(
+          'Quality',
+          [100, ...JPG_QUALITY_OPTIONS].map((value) => ({ value: String(value), label: `${value}` })),
+          String(presetSettings.quality || 74),
+          (value) => updatePresetSetting(format, definition.value, 'quality', value),
+          qualityControlDisabled,
+        ),
+      );
     } else if (format === 'SVG') {
       controlGrid.appendChild(
         createPresetToggleControl(
@@ -4102,6 +4235,28 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     });
   }
 
+  function sendEstimateRasterResult(message, result) {
+    sendPluginMessage({
+      type: 'estimate-raster-result',
+      requestId: message.requestId || '',
+      ok: Boolean(result.ok),
+      detail: typeof result.detail === 'string' ? result.detail : '',
+      bytesLength: typeof result.bytesLength === 'number' ? result.bytesLength : undefined,
+    });
+  }
+
+  function handleEstimateRasterMessage(message) {
+    Promise.resolve()
+      .then(() => estimateRasterPayload(message))
+      .catch((error) => ({
+        ok: false,
+        detail: toErrorMessage(error),
+      }))
+      .then((result) => {
+        sendEstimateRasterResult(message, result);
+      });
+  }
+
   function handleWindowMessage(event) {
     const message = event.data && event.data.pluginMessage;
     if (!message || typeof message.type !== 'string') {
@@ -4120,6 +4275,9 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
         break;
       case 'estimates-result':
         handleEstimatesResult(message);
+        break;
+      case 'estimate-raster':
+        handleEstimateRasterMessage(message);
         break;
       case 'export-start':
         handleExportStart(message);
