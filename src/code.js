@@ -312,7 +312,14 @@ const DEFAULT_NAME_TEMPLATE = [
   { type: 'var', key: 'scale' },
 ];
 
+const DEFAULT_ARCHIVE_NAME_TEMPLATE = [
+  { type: 'var', key: 'page' },
+  { type: 'text', value: ' ' },
+  { type: 'var', key: 'date' },
+];
+
 const VALID_TEMPLATE_VAR_KEYS = new Set(['name', 'page', 'scale', 'width', 'height', 'date', 'time']);
+const VALID_ARCHIVE_TEMPLATE_VAR_KEYS = new Set([...VALID_TEMPLATE_VAR_KEYS, 'count']);
 
 const DEFAULT_STATE = {
   defaults: {
@@ -326,6 +333,7 @@ const DEFAULT_STATE = {
     closeAfterExport: false,
     exportConcurrency: DEFAULT_EXPORT_CONCURRENCY,
     nameTemplate: DEFAULT_NAME_TEMPLATE,
+    archiveNameTemplate: DEFAULT_ARCHIVE_NAME_TEMPLATE,
     preserveFolderStructure: true,
   },
   presetSettings: createDefaultPresetSettings(),
@@ -820,6 +828,9 @@ function normalizeState(state) {
             }
             return toks.length > 1 ? toks : DEFAULT_NAME_TEMPLATE.map((t) => ({ ...t }));
           })(),
+      archiveNameTemplate: Array.isArray(safeSettings.archiveNameTemplate)
+        ? normalizeArchiveNameTemplate(safeSettings.archiveNameTemplate)
+        : DEFAULT_ARCHIVE_NAME_TEMPLATE.map((t) => ({ ...t })),
       preserveFolderStructure: safeSettings.preserveFolderStructure !== false,
     },
     presetSettings: normalizePresetSettings(safeState.presetSettings),
@@ -1218,21 +1229,29 @@ function formatExportTime(date) {
 }
 
 function normalizeNameTemplate(tokens) {
+  return normalizeTemplateTokens(tokens, VALID_TEMPLATE_VAR_KEYS, DEFAULT_NAME_TEMPLATE);
+}
+
+function normalizeArchiveNameTemplate(tokens) {
+  return normalizeTemplateTokens(tokens, VALID_ARCHIVE_TEMPLATE_VAR_KEYS, DEFAULT_ARCHIVE_NAME_TEMPLATE);
+}
+
+function normalizeTemplateTokens(tokens, validVarKeys, fallbackTemplate) {
   if (!Array.isArray(tokens) || tokens.length === 0) {
-    return DEFAULT_NAME_TEMPLATE.map((t) => ({ ...t }));
+    return fallbackTemplate.map((t) => ({ ...t }));
   }
   const normalized = [];
   for (const token of tokens) {
     if (!token || typeof token !== 'object') {
       continue;
     }
-    if (token.type === 'var' && VALID_TEMPLATE_VAR_KEYS.has(token.key)) {
+    if (token.type === 'var' && validVarKeys.has(token.key)) {
       normalized.push({ type: 'var', key: token.key });
     } else if (token.type === 'text' && typeof token.value === 'string') {
       normalized.push({ type: 'text', value: token.value });
     }
   }
-  return normalized.length > 0 ? normalized : DEFAULT_NAME_TEMPLATE.map((t) => ({ ...t }));
+  return normalized.length > 0 ? normalized : fallbackTemplate.map((t) => ({ ...t }));
 }
 
 function evaluateNameTemplate(nodeSummary, format, scale, template, date, options = {}) {
@@ -1266,6 +1285,9 @@ function evaluateNameTemplate(nodeSummary, format, scale, template, date, option
           break;
         case 'time':
           result += formatExportTime(d);
+          break;
+        case 'count':
+          result += String(nodeSummary.count || '');
           break;
       }
     }
