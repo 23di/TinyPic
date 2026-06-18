@@ -72,6 +72,28 @@ function buildPngQuantizeOptions(presetSettings) {
   };
 }
 
+function isRecoverablePngQuantizeError(error) {
+  return /\bQualityTooLow\b/i.test(toErrorMessage(error));
+}
+
+async function quantizePngBytesWithFallback(quantizeWithOptions, presetSettings, getFallbackBytes) {
+  const initialOptions = buildPngQuantizeOptions(presetSettings);
+  try {
+    const result = await quantizeWithOptions(initialOptions);
+    return toUint8Array(result.pngBytes);
+  } catch (error) {
+    if (!isRecoverablePngQuantizeError(error)) {
+      throw error;
+    }
+
+    console.warn(
+      'PNG quantization skipped because the requested quality could not be reached for this image.',
+      error,
+    );
+    return toUint8Array(await getFallbackBytes());
+  }
+}
+
 async function finalisePngBytes(bytes, presetSettings) {
   const optimiseAlpha = Boolean(presetSettings.optimiseAlpha && presetSettings.alphaEnabled !== false);
   const requestedLevel = Math.max(0, Math.min(6, Number(presetSettings.oxipngLevel) || 0));
@@ -162,12 +184,13 @@ async function preparePngPayload(sourceBytes, sourceMimeType, presetSettings) {
   }
 
   if (shouldQuantize && keepAlpha && sourceMimeType === 'image/png') {
-    const quantized = await getPngQuantizer().quantizePng(
-      sourceBytes,
-      buildPngQuantizeOptions(presetSettings),
+    const pngBytes = await quantizePngBytesWithFallback(
+      (options) => getPngQuantizer().quantizePng(sourceBytes, options),
+      presetSettings,
+      async () => sourceBytes,
     );
     return {
-      bytes: await finalisePngBytes(quantized.pngBytes, presetSettings),
+      bytes: await finalisePngBytes(pngBytes, presetSettings),
       mimeType: 'image/png',
     };
   }
@@ -175,20 +198,25 @@ async function preparePngPayload(sourceBytes, sourceMimeType, presetSettings) {
   const source = await loadRasterSource(sourceBytes, sourceMimeType || 'image/png');
   try {
     const { canvas, ctx } = createRasterCanvas(source, !keepAlpha);
+    const encodeCanvasToPngBytes = () => canvasToBytes(canvas, 'image/png');
 
     if (shouldQuantize) {
-      const quantized = await getPngQuantizer().quantizeImageData(
-        ctx.getImageData(0, 0, canvas.width, canvas.height),
-        buildPngQuantizeOptions(presetSettings),
+      const pngBytes = await quantizePngBytesWithFallback(
+        (options) => getPngQuantizer().quantizeImageData(
+          ctx.getImageData(0, 0, canvas.width, canvas.height),
+          options,
+        ),
+        presetSettings,
+        encodeCanvasToPngBytes,
       );
       return {
-        bytes: await finalisePngBytes(quantized.pngBytes, presetSettings),
+        bytes: await finalisePngBytes(pngBytes, presetSettings),
         mimeType: 'image/png',
       };
     }
 
     return {
-      bytes: await finalisePngBytes(await canvasToBytes(canvas, 'image/png'), presetSettings),
+      bytes: await finalisePngBytes(await encodeCanvasToPngBytes(), presetSettings),
       mimeType: 'image/png',
     };
   } finally {

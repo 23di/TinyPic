@@ -390,6 +390,11 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     { type: 'var', key: 'name' },
     { type: 'var', key: 'scale' },
   ];
+  const DEFAULT_ARCHIVE_NAME_TEMPLATE = [
+    { type: 'var', key: 'page' },
+    { type: 'text', value: ' ' },
+    { type: 'var', key: 'date' },
+  ];
   const NAME_TEMPLATE_VARS = [
     { key: 'name', label: 'Frame name' },
     { key: 'page', label: 'Page name' },
@@ -399,12 +404,18 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     { key: 'date', label: 'Date' },
     { key: 'time', label: 'Time' },
   ];
+  const ARCHIVE_NAME_TEMPLATE_VARS = [
+    ...NAME_TEMPLATE_VARS,
+    { key: 'count', label: 'Count' },
+  ];
   const VALID_TEMPLATE_VAR_KEYS = new Set(['name', 'page', 'scale', 'width', 'height', 'date', 'time']);
+  const VALID_ARCHIVE_TEMPLATE_VAR_KEYS = new Set([...VALID_TEMPLATE_VAR_KEYS, 'count']);
   const DEFAULT_SETTINGS = {
     autoEstimateSize: true,
     closeAfterExport: false,
     exportConcurrency: 3,
     nameTemplate: DEFAULT_NAME_TEMPLATE,
+    archiveNameTemplate: DEFAULT_ARCHIVE_NAME_TEMPLATE,
     preserveFolderStructure: true,
   };
   const DEFAULT_DEFAULTS = {
@@ -1134,6 +1145,9 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
               }
               return toks.length > 1 ? toks : DEFAULT_NAME_TEMPLATE.map((t) => ({ ...t }));
             })(),
+        archiveNameTemplate: Array.isArray(safeSettings.archiveNameTemplate)
+          ? normalizeArchiveNameTemplate(safeSettings.archiveNameTemplate)
+          : DEFAULT_ARCHIVE_NAME_TEMPLATE.map((t) => ({ ...t })),
         preserveFolderStructure: safeSettings.preserveFolderStructure !== false,
       },
       presetSettings: normalizePresetSettings(safeState.presetSettings),
@@ -1402,21 +1416,29 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
   }
 
   function normalizeNameTemplate(tokens) {
+    return normalizeTemplateTokens(tokens, VALID_TEMPLATE_VAR_KEYS, DEFAULT_NAME_TEMPLATE);
+  }
+
+  function normalizeArchiveNameTemplate(tokens) {
+    return normalizeTemplateTokens(tokens, VALID_ARCHIVE_TEMPLATE_VAR_KEYS, DEFAULT_ARCHIVE_NAME_TEMPLATE);
+  }
+
+  function normalizeTemplateTokens(tokens, validVarKeys, fallbackTemplate) {
     if (!Array.isArray(tokens) || tokens.length === 0) {
-      return DEFAULT_NAME_TEMPLATE.map((t) => ({ ...t }));
+      return fallbackTemplate.map((t) => ({ ...t }));
     }
     const normalized = [];
     for (const token of tokens) {
       if (!token || typeof token !== 'object') {
         continue;
       }
-      if (token.type === 'var' && VALID_TEMPLATE_VAR_KEYS.has(token.key)) {
+      if (token.type === 'var' && validVarKeys.has(token.key)) {
         normalized.push({ type: 'var', key: token.key });
       } else if (token.type === 'text' && typeof token.value === 'string') {
         normalized.push({ type: 'text', value: token.value });
       }
     }
-    return normalized.length > 0 ? normalized : DEFAULT_NAME_TEMPLATE.map((t) => ({ ...t }));
+    return normalized.length > 0 ? normalized : fallbackTemplate.map((t) => ({ ...t }));
   }
 
   function padTwo(n) {
@@ -1462,6 +1484,9 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
           case 'time':
             result += formatExportTime(d);
             break;
+          case 'count':
+            result += String(row.count || '');
+            break;
         }
       }
     }
@@ -1492,6 +1517,31 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       preserveFolders,
     );
     return `${path}.${getFormatExtension(row.format)}`;
+  }
+
+  function buildArchiveBaseName(template, date = new Date(), context = {}) {
+    const safeTemplate = Array.isArray(template)
+      ? normalizeArchiveNameTemplate(template)
+      : DEFAULT_ARCHIVE_NAME_TEMPLATE.map((token) => ({ ...token }));
+    const safeContext = context && typeof context === 'object' ? context : {};
+    const baseName = evaluateNameTemplate(
+      {
+        name: safeContext.name || '',
+        pageName: safeContext.pageName || '',
+        scale: safeContext.scale !== undefined ? safeContext.scale : 1,
+        width: safeContext.width || '',
+        height: safeContext.height || '',
+        format: safeContext.format || 'PNG',
+        count: safeContext.count || '',
+      },
+      safeTemplate,
+      date,
+    );
+    return sanitizeFileSegment(baseName) || 'Images';
+  }
+
+  function buildArchiveFileName(template, date = new Date(), context = {}) {
+    return `${buildArchiveBaseName(template, date, context)}.zip`;
   }
 
   function getSerializableSettingsState() {
@@ -1707,6 +1757,8 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       state.settings.exportConcurrency = normalizeExportConcurrency(value);
     } else if (key === 'nameTemplate') {
       state.settings.nameTemplate = normalizeNameTemplate(value);
+    } else if (key === 'archiveNameTemplate') {
+      state.settings.archiveNameTemplate = normalizeArchiveNameTemplate(value);
     } else if (key === 'preserveFolderStructure') {
       state.settings.preserveFolderStructure = Boolean(value);
     } else {
@@ -2148,6 +2200,28 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     };
   }
 
+  function isRecoverablePngQuantizeError(error) {
+    return /\bQualityTooLow\b/i.test(toErrorMessage(error));
+  }
+
+  async function quantizePngBytesWithFallback(quantizeWithOptions, presetSettings, getFallbackBytes) {
+    const initialOptions = buildPngQuantizeOptions(presetSettings);
+    try {
+      const result = await quantizeWithOptions(initialOptions);
+      return toUint8Array(result.pngBytes);
+    } catch (error) {
+      if (!isRecoverablePngQuantizeError(error)) {
+        throw error;
+      }
+
+      console.warn(
+        'PNG quantization skipped because the requested quality could not be reached for this image.',
+        error,
+      );
+      return toUint8Array(await getFallbackBytes());
+    }
+  }
+
   async function finalisePngBytes(bytes, presetSettings) {
     const optimiseAlpha = Boolean(presetSettings.optimiseAlpha && presetSettings.alphaEnabled !== false);
     const requestedLevel = Math.max(0, Math.min(6, Number(presetSettings.oxipngLevel) || 0));
@@ -2177,12 +2251,13 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     }
 
     if (shouldQuantize && keepAlpha && sourceMimeType === 'image/png') {
-      const quantized = await getPngQuantizer().quantizePng(
-        sourceBytes,
-        buildPngQuantizeOptions(presetSettings),
+      const pngBytes = await quantizePngBytesWithFallback(
+        (options) => getPngQuantizer().quantizePng(sourceBytes, options),
+        presetSettings,
+        async () => sourceBytes,
       );
       return {
-        bytes: await finalisePngBytes(quantized.pngBytes, presetSettings),
+        bytes: await finalisePngBytes(pngBytes, presetSettings),
         mimeType: 'image/png',
       };
     }
@@ -2190,21 +2265,28 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     const source = await loadRasterSource(sourceBytes, sourceMimeType || 'image/png');
     try {
       const { canvas, ctx } = createRasterCanvas(source, !keepAlpha);
+      const encodeCanvasToPngBytes = async () => {
+        const blob = await canvasToBlob(canvas, 'image/png');
+        return new Uint8Array(await blob.arrayBuffer());
+      };
 
       if (shouldQuantize) {
-        const quantized = await getPngQuantizer().quantizeImageData(
-          ctx.getImageData(0, 0, canvas.width, canvas.height),
-          buildPngQuantizeOptions(presetSettings),
+        const pngBytes = await quantizePngBytesWithFallback(
+          (options) => getPngQuantizer().quantizeImageData(
+            ctx.getImageData(0, 0, canvas.width, canvas.height),
+            options,
+          ),
+          presetSettings,
+          encodeCanvasToPngBytes,
         );
         return {
-          bytes: await finalisePngBytes(quantized.pngBytes, presetSettings),
+          bytes: await finalisePngBytes(pngBytes, presetSettings),
           mimeType: 'image/png',
         };
       }
 
-      const blob = await canvasToBlob(canvas, 'image/png');
       return {
-        bytes: await finalisePngBytes(new Uint8Array(await blob.arrayBuffer()), presetSettings),
+        bytes: await finalisePngBytes(await encodeCanvasToPngBytes(), presetSettings),
         mimeType: 'image/png',
       };
     } finally {
@@ -2381,11 +2463,27 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     });
   }
 
-  function createNameTemplateCard(initialTemplate, onChange, disabled) {
+  function createNameTemplateCard(initialTemplate, onChange, disabled, options = {}) {
     let tokens = initialTemplate.map((t) => ({ ...t }));
+    const config = options && typeof options === 'object' ? options : {};
+    const label = typeof config.label === 'string' && config.label
+      ? config.label
+      : 'Filename template';
+    const availableVars = Array.isArray(config.availableVars) && config.availableVars.length > 0
+      ? config.availableVars
+      : NAME_TEMPLATE_VARS;
+    const extensionLabel = typeof config.extensionLabel === 'string' && config.extensionLabel
+      ? config.extensionLabel
+      : '.ext';
+    const customTextValue = typeof config.customTextValue === 'string'
+      ? config.customTextValue
+      : 'text';
+    const buildPreviewText = typeof config.buildPreviewText === 'function'
+      ? config.buildPreviewText
+      : null;
 
     const card = createNode('div', 'setting-card name-template-card');
-    const labelNode = createNode('span', 'setting-card-label', 'Filename template');
+    const labelNode = createNode('span', 'setting-card-label', label);
     const chipsWrap = createNode('div', 'token-chips');
     const preview = createNode('p', 'token-preview');
     const insertMarker = createNode('div', 'token-insert-marker');
@@ -2396,6 +2494,11 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     let pendingPointerPosition = null;
 
     function updatePreview() {
+      if (buildPreviewText) {
+        preview.textContent = buildPreviewText(tokens);
+        return;
+      }
+
       const exampleRow = state.rows[0] || {
         name: 'Frame 1',
         pageName: 'Page 1',
@@ -2825,7 +2928,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
         chipsWrap.appendChild(chip);
       });
 
-      const extChip = createNode('span', 'token-chip ext-chip', '.ext');
+      const extChip = createNode('span', 'token-chip ext-chip', extensionLabel);
       chipsWrap.appendChild(extChip);
       chipsWrap.appendChild(insertMarker);
     }
@@ -2835,10 +2938,10 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
 
     const addRow = createNode('div', 'token-add-row');
 
-    NAME_TEMPLATE_VARS.forEach(({ key, label }) => {
+    availableVars.forEach(({ key, label: tokenLabel }) => {
       const btn = createNode('button', 'token-add-btn');
       btn.type = 'button';
-      btn.textContent = `+ ${label}`;
+      btn.textContent = `+ ${tokenLabel}`;
       btn.disabled = disabled;
       btn.addEventListener('click', () => {
         tokens.push({ type: 'var', key });
@@ -2852,10 +2955,10 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     textBtn.textContent = '+ Custom text';
     textBtn.disabled = disabled;
     textBtn.addEventListener('click', () => {
-      tokens.push({ type: 'text', value: 'text' });
+      tokens.push({ type: 'text', value: customTextValue });
       onChange([...tokens]);
       window.setTimeout(() => {
-        const chips = dom.exportSettingsControls.querySelectorAll(
+        const chips = chipsWrap.querySelectorAll(
           '.text-chip .token-chip-label[contenteditable="true"]',
         );
         if (chips.length > 0) {
@@ -3092,11 +3195,31 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
   function renderExportSettingsControls() {
     const controlsDisabled = state.isExporting;
     const template = state.settings.nameTemplate || DEFAULT_NAME_TEMPLATE;
+    const archiveTemplate = state.settings.archiveNameTemplate || DEFAULT_ARCHIVE_NAME_TEMPLATE;
     dom.exportSettingsControls.replaceChildren(
       createNameTemplateCard(
         template,
         (nextTemplate) => updateExportSetting('nameTemplate', nextTemplate),
         controlsDisabled,
+      ),
+      createNameTemplateCard(
+        archiveTemplate,
+        (nextTemplate) => updateExportSetting('archiveNameTemplate', nextTemplate),
+        controlsDisabled,
+        {
+          label: 'Archive name',
+          availableVars: ARCHIVE_NAME_TEMPLATE_VARS,
+          extensionLabel: '.zip',
+          customTextValue: 'Images ',
+          buildPreviewText: (tokens) => `Preview: ${buildArchiveFileName(
+            tokens,
+            new Date(),
+            {
+              ...(state.rows[0] || {}),
+              count: state.rows.length,
+            },
+          )}`,
+        },
       ),
       createToggleSettingCard(
         'Preserve folder structure',
@@ -3526,7 +3649,19 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     exportFileQueue = Promise.resolve();
     const totalFiles = Number(message.total) || 0;
     const isDirectoryMode = activeExportTarget && activeExportTarget.mode === 'directory';
-    zipBuffer = (!isDirectoryMode && totalFiles > 1) ? { files: [] } : null;
+    zipBuffer = (!isDirectoryMode && totalFiles > 1)
+      ? {
+        files: [],
+        fileName: buildArchiveFileName(
+          state.settings.archiveNameTemplate,
+          new Date(),
+          {
+            ...(state.rows[0] || {}),
+            count: totalFiles,
+          },
+        ),
+      }
+      : null;
     lockExportButtonWidth();
     state.isExporting = true;
     state.exportProgress = {
@@ -3607,7 +3742,10 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
 
     if (zipBuffer && zipBuffer.files.length > 0 && !message.cancelled) {
       const zipBytes = buildZip(zipBuffer.files);
-      downloadBlob('frame-export.zip', new Blob([zipBytes], { type: 'application/zip' }));
+      downloadBlob(
+        zipBuffer.fileName || 'frame-export.zip',
+        new Blob([zipBytes], { type: 'application/zip' }),
+      );
     }
     zipBuffer = null;
 

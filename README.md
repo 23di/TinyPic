@@ -2,6 +2,8 @@
 
 Figma plugin for compressing and exporting selected frames as PNG, JPG, WebP, SVG, or PDF. All processing runs locally — no uploads to external servers, no analytics, no tracking.
 
+[Open in Figma Community](https://www.figma.com/community/plugin/1612595698368227712)
+
 ## Features
 
 - Batch export multiple frames at once
@@ -11,36 +13,6 @@ Figma plugin for compressing and exporting selected frames as PNG, JPG, WebP, SV
 - Folder structure preserved from frame names (e.g. `section/icon`)
 - Reusable export profiles
 - Export as ZIP or to a local directory
-
-## Getting Started
-
-### Install dependencies
-
-```
-npm install
-```
-
-### Build
-
-```
-npm run build
-```
-
-This produces the `dist/` folder with `code.js` and `ui.html`.
-
-### Load in Figma
-
-1. Open Figma → Plugins → Development → Import plugin from manifest
-2. Select `manifest.json` from this project
-3. Run the plugin on any page with selected frames
-
-### Development
-
-```
-npm run dev
-```
-
-Starts Vite dev server for the UI. Plugin code (`src/code.js`) is rebuilt with `npm run build`.
 
 ## Project Structure
 
