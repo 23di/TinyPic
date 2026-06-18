@@ -49,7 +49,11 @@ function getPngQuantizer() {
 
 async function optimisePng(bytes, options) {
   if (!oxipngInitPromise) {
-    oxipngInitPromise = initOxipng();
+    // Reset the cache on failure so a transient init error can be retried.
+    oxipngInitPromise = initOxipng().catch((error) => {
+      oxipngInitPromise = null;
+      throw error;
+    });
   }
   await oxipngInitPromise;
   return optimisePngSync(
@@ -83,6 +87,9 @@ async function quantizePngBytesWithFallback(quantizeWithOptions, presetSettings,
     return toUint8Array(result.pngBytes);
   } catch (error) {
     if (!isRecoverablePngQuantizeError(error)) {
+      // Drop the cached quantizer so a failed WASM init can be rebuilt on the
+      // next request instead of throwing the same rejection for the session.
+      pngQuantizer = null;
       throw error;
     }
 

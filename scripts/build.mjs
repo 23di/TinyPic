@@ -56,18 +56,20 @@ async function bundleUiScript() {
     },
   });
 
-  // Vite lib build outputs the entry file directly in outDir (may have no extension for ES format)
-  const entries = await fs.readdir(tmpDir, { withFileTypes: true });
-  const bundleEntry = entries.find(
-    (e) => e.isFile() && (e.name === 'ui-bundle' || e.name.startsWith('ui-bundle.')),
-  );
-  if (!bundleEntry) {
-    const names = entries.map((e) => e.name).join(', ');
-    throw new Error(`Vite UI build did not produce ui-bundle. Found: ${names}`);
+  try {
+    // Vite lib build outputs the entry file directly in outDir (may have no extension for ES format)
+    const entries = await fs.readdir(tmpDir, { withFileTypes: true });
+    const bundleEntry = entries.find(
+      (e) => e.isFile() && (e.name === 'ui-bundle' || e.name.startsWith('ui-bundle.')),
+    );
+    if (!bundleEntry) {
+      const names = entries.map((e) => e.name).join(', ');
+      throw new Error(`Vite UI build did not produce ui-bundle. Found: ${names}`);
+    }
+    return await fs.readFile(path.join(tmpDir, bundleEntry.name), 'utf8');
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
   }
-  const script = await fs.readFile(path.join(tmpDir, bundleEntry.name), 'utf8');
-  await fs.rm(tmpDir, { recursive: true, force: true });
-  return script;
 }
 
 async function bundlePluginCode(outputDir) {
@@ -115,15 +117,10 @@ async function writeDistManifest(outputDir) {
 }
 
 async function publishBuild(outputDir) {
-  await fs.mkdir(distDir, { recursive: true });
-
-  await Promise.all([
-    fs.rename(path.join(outputDir, 'code.js'), path.join(distDir, 'code.js')),
-    fs.rename(path.join(outputDir, 'ui.html'), path.join(distDir, 'ui.html')),
-    fs.rename(path.join(outputDir, 'manifest.json'), path.join(distDir, 'manifest.json')),
-  ]);
-
-  await fs.rm(outputDir, { recursive: true, force: true });
+  // Swap the whole build directory into place with a single rename so dist/ is
+  // never left half-updated by a partial per-file move.
+  await fs.rm(distDir, { recursive: true, force: true });
+  await fs.rename(outputDir, distDir);
 }
 
 async function main() {

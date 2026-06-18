@@ -172,13 +172,15 @@
 
     .topbar-head {
       display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      gap: 12px;
+      flex-wrap: nowrap;
+      align-items: center;
+      gap: 8px 12px;
     }
 
     .topbar-main {
       display: flex;
+      align-items: center;
+      gap: 8px;
       flex: 1 1 auto;
       min-width: 0;
     }
@@ -196,12 +198,16 @@
       gap: 8px;
       flex-wrap: nowrap;
       justify-content: flex-end;
+      flex: 0 0 auto;
+      /* Pin to the right; when the controls don't fit, the export wraps to its
+         own line and stays right-aligned (under the controls) instead of colliding. */
+      margin-left: auto;
     }
 
     .profile-stack {
       display: flex;
-      width: 100%;
       min-width: 0;
+      flex: 0 1 auto;
     }
 
     .profile-row {
@@ -231,10 +237,14 @@
 
     .profile-field select {
       width: auto;
-      max-width: 100%;
+      max-width: 78px;
+      flex: none;
       min-width: 0;
       height: 36px;
-      padding: 0 30px 0 12px;
+      padding: 0 24px 0 12px;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
       border: 1px solid var(--line);
       border-radius: var(--radius-md);
       background-color: var(--panel-strong);
@@ -288,6 +298,17 @@
     .primary-btn:hover:not(:disabled) {
       background: var(--accent-hover);
       border-color: var(--accent-hover);
+    }
+
+    .primary-btn.is-stop {
+      background: var(--figma-color-bg-danger, #e03131);
+      border-color: var(--figma-color-bg-danger, #e03131);
+      color: var(--figma-color-text-ondanger, #ffffff);
+    }
+
+    .primary-btn.is-stop:hover:not(:disabled) {
+      background: var(--figma-color-bg-danger-hover, #c92a2a);
+      border-color: var(--figma-color-bg-danger-hover, #c92a2a);
     }
 
     .icon-btn {
@@ -1531,9 +1552,6 @@
       <div class="topbar-head">
         <div class="topbar-main">
           <div class="profile-stack" id="profileStack"></div>
-        </div>
-
-        <div class="topbar-actions">
           <button class="icon-btn settings-btn" id="settingsToggleButton" type="button" aria-label="Open settings" title="Open settings">
             <svg viewBox="0 0 24 24" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M20 7h-9"></path>
@@ -1542,6 +1560,9 @@
               <circle cx="7" cy="7" r="3"></circle>
             </svg>
           </button>
+        </div>
+
+        <div class="topbar-actions">
           <button class="primary-btn" id="exportButton" type="button">Export</button>
         </div>
       </div>

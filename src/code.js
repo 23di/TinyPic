@@ -401,16 +401,42 @@ figma.ui.onmessage = async (message) => {
       }
       break;
     case 'request-estimates':
-      await handleEstimateRequest(message);
+      try {
+        await handleEstimateRequest(message);
+      } catch {
+        // Estimates are best-effort; never let a failure become an unhandled rejection.
+      }
       break;
     case 'run-export':
-      await handleExport(message);
+      try {
+        await handleExport(message);
+      } catch (error) {
+        // A pre-session failure (e.g. reading the selection) would otherwise strand
+        // the UI in the "exporting" state with no export-complete message.
+        if (activeExportSession) {
+          clearActiveExportSession(activeExportSession);
+        }
+        postToUI({
+          type: 'export-complete',
+          exported: 0,
+          completed: 0,
+          total: 0,
+          errors: [toErrorMessage(error)],
+        });
+        figma.notify('Export failed to start', { error: true });
+      }
       break;
     case 'resize-ui':
       resizePluginUi(message.width, message.height);
       break;
     case 'export-file-ack':
       handleExportFileAck(message);
+      break;
+    case 'export-file-processing':
+      handleExportFileProcessing(message);
+      break;
+    case 'cancel-export':
+      cancelExportSession(message);
       break;
     case 'estimate-raster-result':
       handleRasterEstimateResult(message);
@@ -829,7 +855,9 @@ function normalizeState(state) {
             if (safeSettings.nameSuffix) {
               toks.push({ type: 'text', value: String(safeSettings.nameSuffix) });
             }
-            return toks.length > 1 ? toks : DEFAULT_NAME_TEMPLATE.map((t) => ({ ...t }));
+            // A single {name} token is a valid template (e.g. scale was disabled),
+            // so only fall back to the default when nothing was reconstructed.
+            return toks.length >= 1 ? toks : DEFAULT_NAME_TEMPLATE.map((t) => ({ ...t }));
           })(),
       archiveNameTemplate: Array.isArray(safeSettings.archiveNameTemplate)
         ? normalizeArchiveNameTemplate(safeSettings.archiveNameTemplate)
@@ -1055,15 +1083,10 @@ async function extractOriginalFileAsset(node) {
 }
 
 function buildEstimateSettings(row, presetSettings) {
-  if (row.format === 'PNG' || row.format === 'WEBP') {
+  // Export a lossless PNG source for every raster format (PNG/JPG/WEBP) so the
+  // estimate is compressed by the same worker pipeline used for the real export.
+  if (row.format === 'PNG' || row.format === 'WEBP' || row.format === 'JPG') {
     return buildRasterSourceSettings(row.scale);
-  }
-
-  if (row.format === 'JPG') {
-    return {
-      format: 'JPG',
-      constraint: { type: 'SCALE', value: row.scale },
-    };
   }
 
   if (row.format === 'SVG') {
@@ -1176,12 +1199,26 @@ function optimiseSvgBytes(bytes, presetSettings, path) {
   }
 }
 
+const WINDOWS_RESERVED_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
+
 function sanitizeFileSegment(value) {
-  return String(value || 'Untitled')
+  let sanitized = String(value || 'Untitled')
     .replace(/[\\/:*?"<>|]/g, '-')
     .replace(/\s+/g, ' ')
     .trim()
-    .slice(0, 120) || 'Untitled';
+    .slice(0, 120)
+    // Strip trailing dots/spaces (invalid on Windows).
+    .replace(/[ .]+$/, '')
+    .trim();
+  // Neutralize "."/".."/"..." so a segment can never traverse directories.
+  if (sanitized === '' || /^\.+$/.test(sanitized)) {
+    sanitized = 'Untitled';
+  }
+  // Avoid Windows reserved device names (CON, NUL, COM1, ...).
+  if (WINDOWS_RESERVED_NAME.test(sanitized)) {
+    sanitized = `${sanitized}_`;
+  }
+  return sanitized;
 }
 
 function sanitizeVarValue(value) {
@@ -1193,8 +1230,10 @@ function sanitizeVarValue(value) {
       .replace(/[:*?"<>|]/g, '-')
       .replace(/\s+/g, ' ')
       .trim()
+      .replace(/[ .]+$/, '')
       .slice(0, 120))
-    .filter((segment) => segment.length > 0);
+    // Drop empty and dot-only ("."/"..") segments to prevent path traversal.
+    .filter((segment) => segment.length > 0 && !/^\.+$/.test(segment));
   return segments.join('/') || 'Untitled';
 }
 
@@ -1289,9 +1328,6 @@ function evaluateNameTemplate(nodeSummary, format, scale, template, date, option
         case 'time':
           result += formatExportTime(d);
           break;
-        case 'count':
-          result += String(nodeSummary.count || '');
-          break;
       }
     }
   }
@@ -1317,7 +1353,7 @@ function buildFileNameWithExtension(nodeSummary, extension, settings, options = 
       options.format || 'PNG',
       options.scale !== undefined ? options.scale : 1,
       template,
-      new Date(),
+      options.date instanceof Date ? options.date : new Date(),
       options,
     ),
     preserveFolders,
@@ -1325,21 +1361,21 @@ function buildFileNameWithExtension(nodeSummary, extension, settings, options = 
   return `${path}.${sanitizeFileExtension(extension)}`;
 }
 
-function buildFileName(nodeSummary, format, scale, settings) {
+function buildFileName(nodeSummary, format, scale, settings, date) {
   return buildFileNameWithExtension(
     nodeSummary,
     FORMAT_META[format].extension,
     settings,
-    { format, scale },
+    { format, scale, date },
   );
 }
 
-function buildOriginalFileName(nodeSummary, extension, settings) {
+function buildOriginalFileName(nodeSummary, extension, settings, date) {
   return buildFileNameWithExtension(
     nodeSummary,
     extension,
     settings,
-    { format: 'PNG', scale: 1, ignoreScale: true },
+    { format: 'PNG', scale: 1, ignoreScale: true, date },
   );
 }
 
@@ -1480,7 +1516,7 @@ async function handleEstimateRequest(message) {
           return;
         }
         const safeCurrentBytes = assertExportBytes(currentBytes);
-        if (row.format === 'WEBP') {
+        if (row.format === 'WEBP' || row.format === 'PNG' || row.format === 'JPG') {
           bytes = await requestRasterEstimateBytes(
             safeCurrentBytes,
             row.format,
@@ -1492,7 +1528,15 @@ async function handleEstimateRequest(message) {
           }
         } else if (row.format === 'SVG') {
           baselineBytes = safeCurrentBytes.byteLength;
-          bytes = optimiseSvgBytes(safeCurrentBytes, presetSettings).byteLength;
+          // Pass the same filename the export uses so SVGO (e.g. prefixIds) is
+          // configured identically and the estimate matches the delivered file.
+          const svgFileName = buildFileName(
+            toNodeSummary(node),
+            row.format,
+            row.scale,
+            normalizedState.settings,
+          );
+          bytes = optimiseSvgBytes(safeCurrentBytes, presetSettings, svgFileName).byteLength;
         } else {
           bytes = safeCurrentBytes.byteLength;
         }
@@ -1572,7 +1616,23 @@ function createExportSession() {
     id: `export-${Date.now()}-${exportSessionSeed}`,
     deliverySeed: 0,
     pendingAcks: new Map(),
+    cancelled: false,
   };
+}
+
+function cancelExportSession(message) {
+  if (!activeExportSession) {
+    return;
+  }
+  if (message.sessionId && message.sessionId !== activeExportSession.id) {
+    return;
+  }
+  activeExportSession.cancelled = true;
+  // Wake any in-flight ack waits so the export winds down promptly instead of
+  // blocking until the per-file timeout.
+  const entries = Array.from(activeExportSession.pendingAcks.values());
+  activeExportSession.pendingAcks.clear();
+  entries.forEach((entry) => entry.settle({ ok: false, detail: 'Export cancelled.' }));
 }
 
 function clearActiveExportSession(session) {
@@ -1594,16 +1654,29 @@ function handleExportFileAck(message) {
     return;
   }
 
-  const resolve = activeExportSession.pendingAcks.get(message.deliveryId);
-  if (!resolve) {
+  const entry = activeExportSession.pendingAcks.get(message.deliveryId);
+  if (!entry) {
     return;
   }
 
-  resolve({
+  entry.settle({
     ok: Boolean(message.ok),
     detail: typeof message.detail === 'string' ? message.detail : '',
     bytesLength: typeof message.bytesLength === 'number' ? message.bytesLength : undefined,
   });
+}
+
+function handleExportFileProcessing(message) {
+  // The UI signals when it actually starts processing a queued file; restart the
+  // ack timeout from that point so files waiting behind slow encodes (under high
+  // concurrency) don't time out against a clock that began at dispatch.
+  if (!activeExportSession || message.sessionId !== activeExportSession.id) {
+    return;
+  }
+  const entry = activeExportSession.pendingAcks.get(message.deliveryId);
+  if (entry) {
+    entry.refresh();
+  }
 }
 
 function handleRasterEstimateResult(message) {
@@ -1641,19 +1714,29 @@ async function waitForFileAck(session, deliveryId, timeoutMs) {
   const timeout = Number.isFinite(timeoutMs) ? timeoutMs : 4000;
 
   return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      session.pendingAcks.delete(deliveryId);
-      resolve({
-        ok: false,
-        detail: 'UI did not confirm that the download was queued in time.',
-      });
-    }, timeout);
-
-    session.pendingAcks.set(deliveryId, (result) => {
-      clearTimeout(timer);
+    let timer = null;
+    const settle = (result) => {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
       session.pendingAcks.delete(deliveryId);
       resolve(result);
-    });
+    };
+    const refresh = () => {
+      if (timer) {
+        clearTimeout(timer);
+      }
+      timer = setTimeout(() => {
+        session.pendingAcks.delete(deliveryId);
+        resolve({
+          ok: false,
+          detail: 'UI did not confirm that the download was queued in time.',
+        });
+      }, timeout);
+    };
+    refresh();
+    session.pendingAcks.set(deliveryId, { settle, refresh });
   });
 }
 
@@ -1667,7 +1750,7 @@ async function requestRasterEstimateBytes(bytes, format, sourceMimeType, presetS
       pendingRasterEstimateRequests.delete(requestId);
       resolve({
         ok: false,
-        detail: 'UI did not return a WebP estimate in time.',
+        detail: 'UI did not return a raster estimate in time.',
       });
     }, timeout);
 
@@ -1816,6 +1899,12 @@ function encodeUtf8String(value) {
       continue;
     }
 
+    // A lone/unpaired surrogate is not valid UTF-8; emit U+FFFD instead.
+    if (codePoint >= 0xd800 && codePoint <= 0xdfff) {
+      bytes.push(0xef, 0xbf, 0xbd);
+      continue;
+    }
+
     if (codePoint <= 0xffff) {
       bytes.push(
         0xe0 | (codePoint >> 12),
@@ -1890,6 +1979,8 @@ async function handleExport(message) {
   let exported = 0;
   const session = createExportSession();
   const concurrency = normalized.settings.exportConcurrency;
+  // One timestamp for the whole batch so {date}/{time} tokens stay consistent across files.
+  const exportDate = new Date();
 
   activeExportSession = session;
 
@@ -1900,6 +1991,11 @@ async function handleExport(message) {
   });
 
   const tasks = rows.map((row) => async () => {
+    // Stop pulling new work once the user has cancelled.
+    if (session.cancelled) {
+      return;
+    }
+
     const node = nodeMap.get(row.nodeId);
     const missingFileName = `${sanitizeFileSegment(row.id)}.${FORMAT_META[row.format].extension}`;
 
@@ -1937,8 +2033,8 @@ async function handleExport(message) {
     }
 
     const fileName = originalAsset
-      ? buildOriginalFileName(summary, originalAsset.extension, normalized.settings)
-      : buildFileName(summary, row.format, row.scale, normalized.settings);
+      ? buildOriginalFileName(summary, originalAsset.extension, normalized.settings, exportDate)
+      : buildFileName(summary, row.format, row.scale, normalized.settings, exportDate);
 
     postToUI({
       type: 'export-row-status',
@@ -1982,6 +2078,11 @@ async function handleExport(message) {
       });
 
       const ack = await waitForFileAck(session, deliveryId, EXPORT_FILE_ACK_TIMEOUT_MS);
+      if (session.cancelled) {
+        // Cancelled while awaiting confirmation — wind down without counting or
+        // reporting this file as an error.
+        return;
+      }
       if (!ack.ok) {
         throw new Error(ack.detail || 'The UI did not confirm the download.');
       }
@@ -2007,6 +2108,10 @@ async function handleExport(message) {
         fileName,
       });
     } catch (error) {
+      if (session.cancelled) {
+        // Errors caused by tearing down a cancelled export aren't real failures.
+        return;
+      }
       const detail = toErrorMessage(error);
       completed += 1;
       errors.push(`${fileName}: ${detail}`);
@@ -2036,6 +2141,8 @@ async function handleExport(message) {
   try {
     await runTaskPool(tasks, concurrency);
 
+    const cancelled = session.cancelled;
+
     postToUI({
       type: 'export-complete',
       sessionId: session.id,
@@ -2043,15 +2150,18 @@ async function handleExport(message) {
       completed,
       total,
       errors,
+      cancelled,
     });
 
-    if (errors.length) {
+    if (cancelled) {
+      figma.notify(`Export stopped after ${exported} of ${total} file(s)`);
+    } else if (errors.length) {
       figma.notify(`Export finished with ${errors.length} error(s)`, { error: true });
     } else {
       figma.notify(`${exported} file(s) exported`);
     }
 
-    if (normalized.settings.closeAfterExport) {
+    if (!cancelled && normalized.settings.closeAfterExport) {
       setTimeout(() => {
         figma.closePlugin(errors.length ? 'Export finished with errors' : 'Export complete');
       }, 500);

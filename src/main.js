@@ -507,6 +507,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     rows: [],
     isEstimating: false,
     isExporting: false,
+    isCancelling: false,
     exportProgress: {
       completed: 0,
       total: 0,
@@ -667,7 +668,12 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
 
   async function optimisePng(bytes, options) {
     if (!oxipngInitPromise) {
-      oxipngInitPromise = initOxipng();
+      // Reset the cache on failure so a transient init error can be retried
+      // instead of permanently disabling PNG optimization for the session.
+      oxipngInitPromise = initOxipng().catch((error) => {
+        oxipngInitPromise = null;
+        throw error;
+      });
     }
     await oxipngInitPromise;
     return optimisePngSync(
@@ -726,16 +732,29 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     });
   }
 
+  function teardownRasterExportWorker() {
+    if (!rasterExportWorker) {
+      return;
+    }
+    rasterExportWorker.removeEventListener('message', handleRasterExportWorkerMessage);
+    rasterExportWorker.removeEventListener('error', handleRasterExportWorkerError);
+    rasterExportWorker.removeEventListener('messageerror', handleRasterExportWorkerMessageError);
+    // A worker 'error' event does not kill the thread; terminate it so faults
+    // don't leak zombie workers (and their WASM heaps) across a session.
+    rasterExportWorker.terminate();
+    rasterExportWorker = null;
+  }
+
   function handleRasterExportWorkerError(event) {
     rejectAllRasterExportRequests(
       event && event.message ? `Worker compression failed. ${event.message}` : 'Worker compression failed.',
     );
-    rasterExportWorker = null;
+    teardownRasterExportWorker();
   }
 
   function handleRasterExportWorkerMessageError() {
     rejectAllRasterExportRequests('Worker compression failed while receiving a response.');
-    rasterExportWorker = null;
+    teardownRasterExportWorker();
   }
 
   function createNode(tagName, className, textContent) {
@@ -1148,7 +1167,9 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
               if (safeSettings.nameSuffix) {
                 toks.push({ type: 'text', value: String(safeSettings.nameSuffix) });
               }
-              return toks.length > 1 ? toks : DEFAULT_NAME_TEMPLATE.map((t) => ({ ...t }));
+              // A single {name} token is a valid template (e.g. scale was disabled),
+              // so only fall back to the default when nothing was reconstructed.
+              return toks.length >= 1 ? toks : DEFAULT_NAME_TEMPLATE.map((t) => ({ ...t }));
             })(),
         archiveNameTemplate: Array.isArray(safeSettings.archiveNameTemplate)
           ? normalizeArchiveNameTemplate(safeSettings.archiveNameTemplate)
@@ -1345,6 +1366,11 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       directoryHandle,
       usedNames: new Set(),
       namingLock: Promise.resolve(),
+      // Files written this session, so a Stop can remove them again.
+      writtenFiles: [],
+      // Subfolders this session created (not pre-existing ones), for the same reason.
+      createdDirs: [],
+      createdDirPaths: new Set(),
     };
   }
 
@@ -1382,12 +1408,26 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     return trimmed ? trimmed.charAt(0).toUpperCase() : 'F';
   }
 
+  const WINDOWS_RESERVED_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
+
   function sanitizeFileSegment(value) {
-    const sanitized = String(value || 'Untitled')
+    let sanitized = String(value || 'Untitled')
       .replace(/[\\/:*?"<>|]/g, '-')
       .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 120)
+      // Strip trailing dots/spaces (invalid on Windows).
+      .replace(/[ .]+$/, '')
       .trim();
-    return sanitized.slice(0, 120) || 'Untitled';
+    // Neutralize "."/".."/"..." so a segment can never traverse directories.
+    if (sanitized === '' || /^\.+$/.test(sanitized)) {
+      sanitized = 'Untitled';
+    }
+    // Avoid Windows reserved device names (CON, NUL, COM1, ...).
+    if (WINDOWS_RESERVED_NAME.test(sanitized)) {
+      sanitized = `${sanitized}_`;
+    }
+    return sanitized;
   }
 
   function sanitizeVarValue(value) {
@@ -1399,8 +1439,10 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
         .replace(/[:*?"<>|]/g, '-')
         .replace(/\s+/g, ' ')
         .trim()
+        .replace(/[ .]+$/, '')
         .slice(0, 120))
-      .filter((segment) => segment.length > 0);
+      // Drop empty and dot-only ("."/"..") segments to prevent path traversal.
+      .filter((segment) => segment.length > 0 && !/^\.+$/.test(segment));
     return segments.join('/') || 'Untitled';
   }
 
@@ -1542,7 +1584,8 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       safeTemplate,
       date,
     );
-    return sanitizeFileSegment(baseName) || 'Images';
+    // sanitizeFileSegment never returns empty, so guard the empty template here.
+    return baseName.trim() ? sanitizeFileSegment(baseName) : 'Images';
   }
 
   function buildArchiveFileName(template, date = new Date(), context = {}) {
@@ -2023,7 +2066,9 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     const entries = files.map(({ fileName, bytes }) => {
       const name = enc.encode(String(fileName || 'file'));
       const data = bytes instanceof Uint8Array ? bytes : Uint8Array.from(bytes);
-      return { name, data, crc: crc32(data) };
+      // Set general-purpose bit 11 to signal UTF-8 filenames when non-ASCII.
+      const flag = name.some((b) => b > 0x7f) ? 0x0800 : 0;
+      return { name, data, crc: crc32(data), flag };
     });
     const localOffsets = [];
     let off = 0;
@@ -2040,13 +2085,13 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     function w32(v) { dv.setUint32(p, v, true); p += 4; }
     function wb(b) { buf.set(b, p); p += b.length; }
     for (const e of entries) {
-      w32(0x04034B50); w16(20); w16(0); w16(0); w16(0); w16(0);
+      w32(0x04034B50); w16(20); w16(e.flag); w16(0); w16(0); w16(0);
       w32(e.crc); w32(e.data.length); w32(e.data.length);
       w16(e.name.length); w16(0); wb(e.name); wb(e.data);
     }
     for (let i = 0; i < entries.length; i++) {
       const e = entries[i];
-      w32(0x02014B50); w16(20); w16(20); w16(0); w16(0); w16(0); w16(0);
+      w32(0x02014B50); w16(20); w16(20); w16(e.flag); w16(0); w16(0); w16(0);
       w32(e.crc); w32(e.data.length); w32(e.data.length);
       w16(e.name.length); w16(0); w16(0); w16(0); w16(0); w32(0);
       w32(localOffsets[i]); wb(e.name);
@@ -2152,6 +2197,18 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     window.setTimeout(() => URL.revokeObjectURL(url), 8000);
   }
 
+  function reserveUniqueZipEntryName(usedNames, requestedFileName) {
+    const { baseName, extension } = splitFileName(requestedFileName);
+    let candidate = `${baseName}${extension}`;
+    let suffix = 2;
+    while (usedNames.has(candidate)) {
+      candidate = `${baseName} (${suffix})${extension}`;
+      suffix += 1;
+    }
+    usedNames.add(candidate);
+    return candidate;
+  }
+
   function splitFileName(fileName) {
     const normalized = String(fileName || 'export.bin');
     const dotIndex = normalized.lastIndexOf('.');
@@ -2180,11 +2237,12 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     }
   }
 
-  async function reserveDirectoryFileName(target, requestedFileName, dirHandle) {
+  async function reserveDirectoryFileName(target, requestedFileName, dirHandle, scopePath) {
     const resolvedDirHandle = dirHandle || target.directoryHandle;
-    const scopePrefix = (dirHandle && dirHandle !== target.directoryHandle)
-      ? `${dirHandle.name}/`
-      : '';
+    // Scope the in-memory dedup key by the full relative folder path, not just the
+    // leaf directory name, so identically-named files in distinct subfolders don't
+    // collide (e.g. "2024/icons/a.png" vs "2025/icons/a.png").
+    const scopePrefix = scopePath ? `${scopePath}/` : '';
     const reserve = async () => {
       const { baseName, extension } = splitFileName(requestedFileName);
       let candidate = `${baseName}${extension}`;
@@ -2214,23 +2272,47 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
 
     let dirHandle = target.directoryHandle;
     let leafName = fileName;
+    let scopePath = '';
 
     if (state.settings.preserveFolderStructure && fileName.includes('/')) {
-      const parts = fileName.split('/').filter((p) => p.length > 0);
+      const parts = fileName.split('/').filter((p) => p.length > 0 && p !== '.' && p !== '..');
       leafName = parts.pop();
+      let pathSoFar = '';
       for (const part of parts) {
+        pathSoFar = pathSoFar ? `${pathSoFar}/${part}` : part;
+        // Probe first so we only track folders this session actually created
+        // (pre-existing folders must never be deleted on Stop).
+        let existed = true;
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          await dirHandle.getDirectoryHandle(part);
+        } catch (error) {
+          if (error && error.name === 'NotFoundError') {
+            existed = false;
+          }
+        }
+        const parentHandle = dirHandle;
         // eslint-disable-next-line no-await-in-loop
-        dirHandle = await dirHandle.getDirectoryHandle(part || 'folder', { create: true });
+        dirHandle = await parentHandle.getDirectoryHandle(part, { create: true });
+        if (!existed && Array.isArray(target.createdDirs) && !target.createdDirPaths.has(pathSoFar)) {
+          target.createdDirPaths.add(pathSoFar);
+          target.createdDirs.push({ parentHandle, name: part, path: pathSoFar });
+        }
       }
+      scopePath = parts.join('/');
     }
 
-    const resolvedFileName = await reserveDirectoryFileName(target, leafName, dirHandle);
+    const resolvedFileName = await reserveDirectoryFileName(target, leafName, dirHandle, scopePath);
     const fileHandle = await dirHandle.getFileHandle(resolvedFileName, { create: true });
     const writable = await fileHandle.createWritable();
 
     try {
       await writable.write(blob);
       await writable.close();
+      // Track what we wrote so a Stop can delete exactly these files.
+      if (Array.isArray(target.writtenFiles)) {
+        target.writtenFiles.push({ dirHandle, name: resolvedFileName });
+      }
     } catch (error) {
       try {
         await writable.abort();
@@ -2429,7 +2511,12 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       };
     }
 
-    const presetSettings = getPresetSettings(state.presetSettings, message.format, message.preset);
+    // The estimate path (estimate-raster) ships the already-resolved preset in
+    // message.presetSettings without a `preset` key; prefer it so estimates honor
+    // the selected preset instead of falling back to defaults.
+    const presetSettings = message.presetSettings && typeof message.presetSettings === 'object'
+      ? normalizePresetSettingBundle(message.format, message.presetSettings, message.presetSettings)
+      : getPresetSettings(state.presetSettings, message.format, message.preset);
     try {
       return await prepareRasterPayloadInWorker(message, presetSettings);
     } catch (error) {
@@ -2491,7 +2578,11 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       }
 
       if (zipBuffer) {
-        zipBuffer.files.push({ fileName: message.fileName || 'export.bin', bytes: payload.bytes });
+        const entryName = reserveUniqueZipEntryName(
+          zipBuffer.usedNames,
+          message.fileName || 'export.bin',
+        );
+        zipBuffer.files.push({ fileName: entryName, bytes: payload.bytes });
         return {
           ok: true,
           detail: 'Buffered for ZIP.',
@@ -2956,11 +3047,13 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
             if (removeBtn && e.relatedTarget === removeBtn) {
               return;
             }
-            const trimmed = label.textContent;
-            if (!trimmed) {
+            // Preserve surrounding spaces — they're meaningful for separators
+            // like " - "; only drop a token that is completely empty.
+            const value = label.textContent || '';
+            if (!value) {
               tokens.splice(index, 1);
             } else {
-              tokens[index] = { type: 'text', value: trimmed };
+              tokens[index] = { type: 'text', value };
             }
             onChange([...tokens]);
           });
@@ -3754,6 +3847,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     zipBuffer = (!pdfMergeBuffer && !isDirectoryMode && totalFiles > 1)
       ? {
         files: [],
+        usedNames: new Set(),
         fileName: buildArchiveFileName(
           state.settings.archiveNameTemplate,
           new Date(),
@@ -3852,17 +3946,50 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     }
     pdfMergeBuffer = null;
 
+    let zipError = '';
     if (zipBuffer && zipBuffer.files.length > 0 && !message.cancelled) {
-      const zipBytes = buildZip(zipBuffer.files);
-      downloadBlob(
-        zipBuffer.fileName || 'frame-export.zip',
-        new Blob([zipBytes], { type: 'application/zip' }),
-      );
+      try {
+        const zipBytes = buildZip(zipBuffer.files);
+        downloadBlob(
+          zipBuffer.fileName || 'frame-export.zip',
+          new Blob([zipBytes], { type: 'application/zip' }),
+        );
+      } catch (error) {
+        zipError = toErrorMessage(error);
+      }
     }
     zipBuffer = null;
 
+    if (message.cancelled && activeExportTarget && activeExportTarget.mode === 'directory') {
+      // Files stream to disk during export; on Stop, drain any in-flight write then
+      // remove the files this session already wrote so nothing is left behind.
+      try { await exportFileQueue; } catch (error) { /* ignore */ }
+      const written = activeExportTarget.writtenFiles || [];
+      for (const entry of written) {
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          await entry.dirHandle.removeEntry(entry.name);
+        } catch (error) {
+          // File may have been moved/removed already — best-effort cleanup.
+        }
+      }
+      // Then remove the (now-empty) folders this session created, deepest first.
+      const createdDirs = (activeExportTarget.createdDirs || [])
+        .slice()
+        .sort((a, b) => b.path.length - a.path.length);
+      for (const dir of createdDirs) {
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          await dir.parentHandle.removeEntry(dir.name);
+        } catch (error) {
+          // Folder not empty / already gone — leave it, never force-delete.
+        }
+      }
+    }
+
     activeExportTarget = null;
     state.isExporting = false;
+    state.isCancelling = false;
     state.exportProgress = {
       completed: Number(message.completed) || state.exportProgress.completed || 0,
       total: Number(message.total) || state.exportProgress.total || 0,
@@ -3882,6 +4009,8 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       );
     } else if (pdfMergeError) {
       updateFooterStatus(`Export finished, but merged PDF failed. ${pdfMergeError}`);
+    } else if (zipError) {
+      updateFooterStatus(`Export finished, but building the ZIP failed. ${zipError}`);
     } else if (errors.length) {
       updateFooterStatus(`Export finished with errors. ${errors[0]}`);
     } else {
@@ -3909,7 +4038,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     if (row.status === 'processing' || state.isEstimating) {
       return 'Estimating size';
     }
-    if (value === undefined) {
+    if (value === undefined || value === null) {
       return 'Ready';
     }
     return String(value);
@@ -4339,6 +4468,8 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
   function lockExportButtonWidth() {
     const hasRows = state.rows.length > 0;
     const outputCount = getExportOutputCount();
+    // Only the idle label and the spinner labels are shown on the button, so the
+    // lock keeps the button at its idle size (no growth when export starts).
     const labels = [
       hasRows && outputCount > 1 ? `Export ${outputCount}` : 'Export',
       ...EXPORT_BUTTON_BUSY_FRAMES.map((frame) => formatExportButtonBusyLabel(frame, 100)),
@@ -4398,6 +4529,9 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
         state.exportProgress.completed,
         state.exportProgress.total,
       );
+      // Animated spinner + progress throughout, including while cancelling (the
+      // button greys out and the footer shows "Stopping export…"). Keeping the same
+      // compact label avoids any width change mid-export.
       return formatExportButtonBusyLabel(frame, percent);
     }
 
@@ -4455,7 +4589,10 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     dom.settingsPanel.hidden = !isSettingsView;
     dom.exportPanel.hidden = isSettingsView;
     dom.exportButton.hidden = isSettingsView;
-    dom.exportButton.disabled = !hasRows || state.isExporting;
+    // While exporting the button acts as Stop (enabled), except once a stop is in
+    // flight; otherwise it's the Export button (enabled only when there are rows).
+    dom.exportButton.disabled = state.isExporting ? state.isCancelling : !hasRows;
+    dom.exportButton.classList.toggle('is-stop', state.isExporting && !state.isCancelling);
     dom.exportButton.style.width = exportButtonLockedWidth > 0 ? `${exportButtonLockedWidth}px` : '';
     syncExportButtonAnimation();
     updateExportButtonLabel();
@@ -4474,28 +4611,44 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
 
   function handleExportFileMessage(message) {
     exportFileQueue = exportFileQueue.then(async () => {
-      const isStaleSession = state.exportProgress.sessionId
-        && message.sessionId
-        && message.sessionId !== state.exportProgress.sessionId;
+      try {
+        const isStaleSession = state.exportProgress.sessionId
+          && message.sessionId
+          && message.sessionId !== state.exportProgress.sessionId;
 
-      if (!isStaleSession && message.rowId) {
-        const rawByteLen = typeof message.baselineBytes === 'number'
-          ? message.baselineBytes
-          : message.bytes instanceof Uint8Array || message.bytes instanceof ArrayBuffer
-            ? message.bytes.byteLength
-            : Array.isArray(message.bytes) ? message.bytes.length : 0;
-        if (rawByteLen > 0) {
-          state.rows = state.rows.map((row) =>
-            row.id === message.rowId ? { ...row, baselineBytes: rawByteLen } : row,
-          );
+        if (!isStaleSession && message.rowId) {
+          const rawByteLen = typeof message.baselineBytes === 'number'
+            ? message.baselineBytes
+            : message.bytes instanceof Uint8Array || message.bytes instanceof ArrayBuffer
+              ? message.bytes.byteLength
+              : Array.isArray(message.bytes) ? message.bytes.length : 0;
+          if (rawByteLen > 0) {
+            state.rows = state.rows.map((row) =>
+              row.id === message.rowId ? { ...row, baselineBytes: rawByteLen } : row,
+            );
+          }
         }
-      }
 
-      const result = isStaleSession
-        ? { ok: false, detail: 'Stale export session.' }
-        : await queueDownload(message);
-      sendExportFileAck(message, result);
-    });
+        if (!isStaleSession && message.deliveryId) {
+          // Tell the plugin we've started processing so it restarts the ack
+          // timeout from now rather than from dispatch.
+          sendPluginMessage({
+            type: 'export-file-processing',
+            sessionId: message.sessionId,
+            deliveryId: message.deliveryId,
+          });
+        }
+
+        const result = isStaleSession
+          ? { ok: false, detail: 'Stale export session.' }
+          : await queueDownload(message);
+        sendExportFileAck(message, result);
+      } catch (error) {
+        // Never let a single delivery reject the shared queue, which would skip
+        // every subsequent file's ACK and stall the whole export.
+        sendExportFileAck(message, { ok: false, detail: toErrorMessage(error) });
+      }
+    }).catch(() => {});
   }
 
   function sendEstimateRasterResult(message, result) {
@@ -4562,15 +4715,43 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     }
   }
 
+  function handleExportButtonClick() {
+    if (state.isExporting) {
+      handleStopClick();
+    } else {
+      handleExportClick();
+    }
+  }
+
+  function handleStopClick() {
+    if (!state.isExporting || state.isCancelling) {
+      return;
+    }
+    state.isCancelling = true;
+    sendPluginMessage({
+      type: 'cancel-export',
+      sessionId: state.exportProgress.sessionId || '',
+    });
+    updateFooterStatus('Stopping export…');
+    render();
+  }
+
   async function handleExportClick() {
     if (!state.rows.length || state.isExporting) {
       return;
     }
 
+    // Claim the exporting state synchronously so a fast second click can't re-enter
+    // during the awaited directory picker and launch a second export.
+    state.isExporting = true;
+    state.isCancelling = false;
+
     try {
       activeExportTarget = await prepareExportTarget();
     } catch (error) {
       activeExportTarget = null;
+      state.isExporting = false;
+      state.isCancelling = false;
       updateFooterStatus(
         isAbortError(error)
           ? 'Export cancelled.'
@@ -4580,7 +4761,6 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     }
 
     lockExportButtonWidth();
-    state.isExporting = true;
     render();
 
     sendPluginMessage({
@@ -4621,7 +4801,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     });
 
     dom.settingsCloseButton.addEventListener('click', () => setView('export'));
-    dom.exportButton.addEventListener('click', handleExportClick);
+    dom.exportButton.addEventListener('click', handleExportButtonClick);
     dom.settingsImportInput.addEventListener('change', handleSettingsImportChange);
     dom.resizeGrip.addEventListener('pointerdown', handleResizeGripPointerDown);
     dom.resizeGrip.addEventListener('pointermove', handleResizeGripPointerMove);
@@ -4639,6 +4819,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       stopExportButtonAnimation();
       Array.from(previewUrls.values()).forEach((url) => URL.revokeObjectURL(url));
       previewUrls.clear();
+      teardownRasterExportWorker();
     });
   }
 

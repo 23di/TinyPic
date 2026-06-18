@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -26,6 +26,18 @@ function sanitizeUrl(value) {
 
   if (url.startsWith('git+')) {
     url = url.slice(4);
+  }
+
+  // npm shorthand: github:user/repo, gh:user/repo, gitlab:..., bitbucket:...
+  const shorthandHosts = {
+    github: 'github.com',
+    gh: 'github.com',
+    gitlab: 'gitlab.com',
+    bitbucket: 'bitbucket.org',
+  };
+  const shorthandMatch = /^([a-z]+):([^/].*)$/i.exec(url);
+  if (shorthandMatch && shorthandHosts[shorthandMatch[1].toLowerCase()]) {
+    url = `https://${shorthandHosts[shorthandMatch[1].toLowerCase()]}/${shorthandMatch[2]}`;
   }
 
   if (url.startsWith('git://')) {
@@ -167,10 +179,12 @@ function listArchiveEntries(archivePath) {
   return output.split('\n').filter(Boolean);
 }
 
-function extractArchiveEntry(archivePath, archiveEntry) {
-  return execFileSync('tar', ['-xOzf', archivePath, archiveEntry], {
-    encoding: 'utf8',
-    maxBuffer: 16 * 1024 * 1024,
+function extractArchive(archivePath, destDir) {
+  // Extract the whole tarball to disk so we can read entries by exact path.
+  // (bsdtar treats a named entry operand as a glob, which crashes on filenames
+  // containing glob metacharacters.)
+  execFileSync('tar', ['-xzf', archivePath, '-C', destDir], {
+    maxBuffer: 64 * 1024 * 1024,
   });
 }
 
@@ -180,7 +194,8 @@ async function extractLicenseFiles(packageMeta, tempDir) {
     return [];
   }
 
-  const archivePath = path.join(tempDir, `${packageMeta.name.replace(/[\\/]/g, '__')}-${packageMeta.version}.tgz`);
+  const safeName = `${packageMeta.name.replace(/[\\/]/g, '__')}-${packageMeta.version}`;
+  const archivePath = path.join(tempDir, `${safeName}.tgz`);
   await downloadFile(tarballUrl, archivePath);
 
   const entries = listArchiveEntries(archivePath);
@@ -196,21 +211,31 @@ async function extractLicenseFiles(packageMeta, tempDir) {
     return isLicenseFileName(path.posix.basename(entry));
   }));
 
+  if (!candidates.length) {
+    return [];
+  }
+
+  const extractDir = path.join(tempDir, `${safeName}-extracted`);
+  await mkdir(extractDir, { recursive: true });
+  extractArchive(archivePath, extractDir);
+
   const extracted = [];
   const seenNames = new Set();
 
-  candidates.forEach((entry) => {
+  for (const entry of candidates) {
     const baseName = path.posix.basename(entry);
     if (seenNames.has(baseName)) {
-      return;
+      continue;
     }
 
     seenNames.add(baseName);
+    // eslint-disable-next-line no-await-in-loop
+    const content = await readFile(path.join(extractDir, entry), 'utf8');
     extracted.push({
       fileName: baseName,
-      content: extractArchiveEntry(archivePath, entry).trim(),
+      content: content.trim(),
     });
-  });
+  }
 
   return extracted;
 }
@@ -264,9 +289,13 @@ function buildNoticeMarkdown(libraries) {
       library.licenseFiles.forEach((licenseFile) => {
         lines.push(`### ${licenseFile.fileName}`);
         lines.push('');
-        lines.push('````text');
+        // Fence must be longer than any backtick run inside the content.
+        const longestBacktickRun = (String(licenseFile.content).match(/`+/g) || [])
+          .reduce((max, run) => Math.max(max, run.length), 0);
+        const fence = '`'.repeat(Math.max(4, longestBacktickRun + 1));
+        lines.push(`${fence}text`);
         lines.push(licenseFile.content);
-        lines.push('````');
+        lines.push(fence);
         lines.push('');
       });
     } else {
@@ -308,16 +337,10 @@ async function buildOpenSourceLibraries() {
       ...library,
       noticeFiles: licenseFiles.map((licenseFile) => licenseFile.fileName),
     }));
+    // Only OPEN_SOURCE_LIBRARIES is consumed by the UI; emitting the summary,
+    // notice file name, and the full (~85KB) notice text just bloats the module.
     const moduleSource = [
-      `export const OPEN_SOURCE_LIBRARY_SUMMARY = Object.freeze(${JSON.stringify({
-        generatedAt: new Date().toISOString().slice(0, 10),
-        totalLibraries: libraries.length,
-      }, null, 2)});`,
-      '',
       `export const OPEN_SOURCE_LIBRARIES = Object.freeze(${JSON.stringify(librarySummaries, null, 2)});`,
-      '',
-      `export const THIRD_PARTY_NOTICE_FILE_NAME = ${JSON.stringify(NOTICE_FILE_NAME)};`,
-      `export const THIRD_PARTY_NOTICE_TEXT = ${JSON.stringify(noticeText)};`,
       '',
     ].join('\n');
 
