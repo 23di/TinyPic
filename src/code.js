@@ -1083,10 +1083,15 @@ async function extractOriginalFileAsset(node) {
 }
 
 function buildEstimateSettings(row, presetSettings) {
-  // Export a lossless PNG source for every raster format (PNG/JPG/WEBP) so the
-  // estimate is compressed by the same worker pipeline used for the real export.
-  if (row.format === 'PNG' || row.format === 'WEBP' || row.format === 'JPG') {
+  if (row.format === 'PNG' || row.format === 'WEBP') {
     return buildRasterSourceSettings(row.scale);
+  }
+
+  if (row.format === 'JPG') {
+    return {
+      format: 'JPG',
+      constraint: { type: 'SCALE', value: row.scale },
+    };
   }
 
   if (row.format === 'SVG') {
@@ -1516,7 +1521,7 @@ async function handleEstimateRequest(message) {
           return;
         }
         const safeCurrentBytes = assertExportBytes(currentBytes);
-        if (row.format === 'WEBP' || row.format === 'PNG' || row.format === 'JPG') {
+        if (row.format === 'WEBP') {
           bytes = await requestRasterEstimateBytes(
             safeCurrentBytes,
             row.format,

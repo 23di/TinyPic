@@ -162,7 +162,7 @@ test('one timestamp for the whole batch — {date}/{time} stay consistent (TP-11
 });
 
 // ---------------------------------------------------------------------------
-test('estimates: PNG/JPG/WEBP route through the raster worker, SVG does not (TP-03/04)', async () => {
+test('estimates: only WebP routes through raster worker; PNG/JPG stay fast (TP-03/04)', async () => {
   const nodes = [makeNode('n1', 'A'), makeNode('n2', 'B'), makeNode('n3', 'C'), makeNode('n4', 'D')];
   const p = createPlugin({ nodes });
   const base = await bootstrap(p);
@@ -174,12 +174,14 @@ test('estimates: PNG/JPG/WEBP route through the raster worker, SVG does not (TP-
   ];
   const { result, rasterRequests } = await requestEstimates(p, rows, { base });
   const formats = rasterRequests.map((r) => r.format).sort();
-  assert.deepEqual(formats, ['JPG', 'PNG', 'WEBP'], 'PNG/JPG/WEBP estimated via worker, SVG excluded');
+  assert.deepEqual(formats, ['WEBP'], 'only WebP needs worker estimation');
   assert.ok(
     rasterRequests.every((r) => r.presetSettings && typeof r.presetSettings === 'object'),
     'estimate-raster carries presetSettings (TP-04)',
   );
   assert.ok(result.estimates.r1 && typeof result.estimates.r1.bytes === 'number', 'PNG estimate produced bytes');
+  assert.ok(result.estimates.r2 && typeof result.estimates.r2.bytes === 'number', 'JPG estimate produced bytes');
+  assert.ok(result.estimates.r3 && typeof result.estimates.r3.bytes === 'number', 'WEBP estimate produced bytes');
   assert.ok(result.estimates.r4 && typeof result.estimates.r4.bytes === 'number', 'SVG estimate produced bytes');
 });
 
