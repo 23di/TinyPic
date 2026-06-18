@@ -261,6 +261,7 @@ const PRESET_DEFINITIONS = {
       settings: {
         contentsOnly: true,
         useAbsoluteBounds: false,
+        mergePdfs: true,
       },
     },
     {
@@ -268,6 +269,7 @@ const PRESET_DEFINITIONS = {
       settings: {
         contentsOnly: true,
         useAbsoluteBounds: true,
+        mergePdfs: true,
       },
     },
     {
@@ -275,6 +277,7 @@ const PRESET_DEFINITIONS = {
       settings: {
         contentsOnly: false,
         useAbsoluteBounds: true,
+        mergePdfs: true,
       },
     },
   ],
@@ -711,7 +714,7 @@ function normalizePresetSettingValue(format, key, value, fallbackValue) {
       }
       break;
     case 'PDF':
-      if (key === 'contentsOnly' || key === 'useAbsoluteBounds') {
+      if (key === 'contentsOnly' || key === 'useAbsoluteBounds' || key === 'mergePdfs') {
         return Boolean(value);
       }
       break;

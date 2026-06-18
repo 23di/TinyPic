@@ -2,6 +2,7 @@ import LibImageQuant from '@fe-daily/libimagequant-wasm';
 import * as wasmModuleNamespace from '@fe-daily/libimagequant-wasm/wasm/libimagequant_wasm.js';
 import initOxipng, { optimise as optimisePngSync } from '@jsquash/oxipng/codec/pkg/squoosh_oxipng.js';
 import { encode as encodeWebp } from '@jsquash/webp';
+import { PDFDocument } from 'pdf-lib';
 import {
   OPEN_SOURCE_LIBRARIES,
 } from './open-source-libraries.js';
@@ -313,6 +314,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
         settings: {
           contentsOnly: true,
           useAbsoluteBounds: false,
+          mergePdfs: true,
         },
       },
       {
@@ -321,6 +323,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
         settings: {
           contentsOnly: true,
           useAbsoluteBounds: true,
+          mergePdfs: true,
         },
       },
       {
@@ -329,6 +332,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
         settings: {
           contentsOnly: false,
           useAbsoluteBounds: true,
+          mergePdfs: true,
         },
       },
     ],
@@ -454,6 +458,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
   let activeExportTarget = null;
   let exportFileQueue = Promise.resolve();
   let zipBuffer = null;
+  let pdfMergeBuffer = null;
   let pngQuantizer = null;
   let oxipngInitPromise = null;
   let exportButtonAnimationTimer = null;
@@ -1030,7 +1035,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
         }
         break;
       case 'PDF':
-        if (key === 'contentsOnly' || key === 'useAbsoluteBounds') {
+        if (key === 'contentsOnly' || key === 'useAbsoluteBounds' || key === 'mergePdfs') {
           return Boolean(value);
         }
         break;
@@ -1542,6 +1547,68 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
 
   function buildArchiveFileName(template, date = new Date(), context = {}) {
     return `${buildArchiveBaseName(template, date, context)}.zip`;
+  }
+
+  function buildArchivePdfFileName(template, date = new Date(), context = {}) {
+    return `${buildArchiveBaseName(template, date, context)}.pdf`;
+  }
+
+  function shouldMergePdfExport(rows) {
+    if (!Array.isArray(rows) || rows.length <= 1) {
+      return false;
+    }
+
+    return rows.every((row) => {
+      if (!row || row.format !== 'PDF') {
+        return false;
+      }
+      const presetSettings = getPresetSettings(state.presetSettings, 'PDF', row.preset);
+      return Boolean(presetSettings.mergePdfs);
+    });
+  }
+
+  function getExportOutputCount(rows = state.rows) {
+    const safeRows = Array.isArray(rows) ? rows : [];
+    if (safeRows.length === 0) {
+      return 0;
+    }
+    return shouldMergePdfExport(safeRows) ? 1 : safeRows.length;
+  }
+
+  function sortPdfMergeFiles(files) {
+    const rowOrder = new Map(state.rows.map((row, index) => [row.id, index]));
+    return files.slice().sort((a, b) => {
+      const aIndex = rowOrder.has(a.rowId) ? rowOrder.get(a.rowId) : Number.MAX_SAFE_INTEGER;
+      const bIndex = rowOrder.has(b.rowId) ? rowOrder.get(b.rowId) : Number.MAX_SAFE_INTEGER;
+      return aIndex - bIndex;
+    });
+  }
+
+  async function mergePdfFiles(files) {
+    const mergedPdf = await PDFDocument.create();
+
+    for (const file of sortPdfMergeFiles(files)) {
+      const sourcePdf = await PDFDocument.load(toUint8Array(file.bytes));
+      const copiedPages = await mergedPdf.copyPages(sourcePdf, sourcePdf.getPageIndices());
+      copiedPages.forEach((page) => mergedPdf.addPage(page));
+    }
+
+    return new Uint8Array(await mergedPdf.save());
+  }
+
+  async function flushPdfMergeBuffer(buffer) {
+    if (!buffer || !Array.isArray(buffer.files) || buffer.files.length === 0) {
+      return null;
+    }
+
+    const bytes = await mergePdfFiles(buffer.files);
+    const blob = new Blob([bytes], { type: 'application/pdf' });
+    if (!blob.size) {
+      throw new Error('Merged PDF creation failed: the file payload is empty.');
+    }
+
+    await deliverExportFile(buffer.fileName || 'frame-export.pdf', blob);
+    return bytes.byteLength;
   }
 
   function getSerializableSettingsState() {
@@ -2428,6 +2495,19 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
         return {
           ok: true,
           detail: 'Buffered for ZIP.',
+          bytesLength: payload.bytes.byteLength,
+        };
+      }
+
+      if (pdfMergeBuffer && message.format === 'PDF') {
+        pdfMergeBuffer.files.push({
+          rowId: message.rowId || '',
+          fileName: message.fileName || 'export.pdf',
+          bytes: payload.bytes,
+        });
+        return {
+          ok: true,
+          detail: 'Buffered for merged PDF.',
           bytesLength: payload.bytes.byteLength,
         };
       }
@@ -3516,6 +3596,14 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     } else if (format === 'PDF') {
       controlGrid.appendChild(
         createPresetToggleControl(
+          'Merge into one PDF',
+          Boolean(presetSettings.mergePdfs),
+          (checked) => updatePresetSetting(format, definition.value, 'mergePdfs', checked),
+          controlsDisabled,
+        ),
+      );
+      controlGrid.appendChild(
+        createPresetToggleControl(
           'Contents only',
           Boolean(presetSettings.contentsOnly),
           (checked) => updatePresetSetting(format, definition.value, 'contentsOnly', checked),
@@ -3649,7 +3737,21 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     exportFileQueue = Promise.resolve();
     const totalFiles = Number(message.total) || 0;
     const isDirectoryMode = activeExportTarget && activeExportTarget.mode === 'directory';
-    zipBuffer = (!isDirectoryMode && totalFiles > 1)
+    const shouldMergePdfs = shouldMergePdfExport(state.rows);
+    pdfMergeBuffer = shouldMergePdfs
+      ? {
+        files: [],
+        fileName: buildArchivePdfFileName(
+          state.settings.archiveNameTemplate,
+          new Date(),
+          {
+            ...(state.rows[0] || {}),
+            count: totalFiles,
+          },
+        ),
+      }
+      : null;
+    zipBuffer = (!pdfMergeBuffer && !isDirectoryMode && totalFiles > 1)
       ? {
         files: [],
         fileName: buildArchiveFileName(
@@ -3735,10 +3837,20 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     renderFooter();
   }
 
-  function handleExportComplete(message) {
+  async function handleExportComplete(message) {
     if (state.exportProgress.sessionId && message.sessionId && message.sessionId !== state.exportProgress.sessionId) {
       return;
     }
+
+    let pdfMergeError = '';
+    if (pdfMergeBuffer && pdfMergeBuffer.files.length > 0 && !message.cancelled) {
+      try {
+        await flushPdfMergeBuffer(pdfMergeBuffer);
+      } catch (error) {
+        pdfMergeError = toErrorMessage(error);
+      }
+    }
+    pdfMergeBuffer = null;
 
     if (zipBuffer && zipBuffer.files.length > 0 && !message.cancelled) {
       const zipBytes = buildZip(zipBuffer.files);
@@ -3768,6 +3880,8 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
           ? `Export stopped after ${exported} of ${total} files. ${errors[0]}`
           : `Export stopped after ${exported} of ${total} files.`,
       );
+    } else if (pdfMergeError) {
+      updateFooterStatus(`Export finished, but merged PDF failed. ${pdfMergeError}`);
     } else if (errors.length) {
       updateFooterStatus(`Export finished with errors. ${errors[0]}`);
     } else {
@@ -4032,29 +4146,35 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     });
     presetField.appendChild(presetSelect);
 
-    const scaleField = createNode('label', 'profile-field');
-    const scaleSelect = document.createElement('select');
-    scaleSelect.setAttribute('aria-label', 'Scale');
-    SCALE_OPTIONS.forEach((value) => {
-      const node = document.createElement('option');
-      node.value = String(value);
-      node.textContent = formatScale(value);
-      scaleSelect.appendChild(node);
-    });
-    scaleSelect.value = String(profile.scale);
-    scaleSelect.disabled = state.isExporting || isVectorFormat(profile.format);
-    scaleSelect.addEventListener('change', () => {
-      updateProfileValue(profile.id, 'scale', scaleSelect.value);
-    });
-    scaleField.appendChild(scaleSelect);
+    fields.append(formatField, presetField);
 
-    fields.append(formatField, presetField, scaleField);
+    let scaleSelect = null;
+    if (profile.format !== 'PDF') {
+      const scaleField = createNode('label', 'profile-field');
+      scaleSelect = document.createElement('select');
+      scaleSelect.setAttribute('aria-label', 'Scale');
+      SCALE_OPTIONS.forEach((value) => {
+        const node = document.createElement('option');
+        node.value = String(value);
+        node.textContent = formatScale(value);
+        scaleSelect.appendChild(node);
+      });
+      scaleSelect.value = String(profile.scale);
+      scaleSelect.disabled = state.isExporting || isVectorFormat(profile.format);
+      scaleSelect.addEventListener('change', () => {
+        updateProfileValue(profile.id, 'scale', scaleSelect.value);
+      });
+      scaleField.appendChild(scaleSelect);
+      fields.appendChild(scaleField);
+    }
     row.appendChild(fields);
     dom.profileStack.appendChild(row);
 
     fitSelectToContent(formatSelect);
     fitSelectToContent(presetSelect);
-    fitSelectToContent(scaleSelect);
+    if (scaleSelect) {
+      fitSelectToContent(scaleSelect);
+    }
   }
 
   function renderRow(row) {
@@ -4100,10 +4220,12 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     const metaSegments = [
       createNode('span', 'meta-segment', formatDimensions(row.width, row.height)),
       createNode('span', 'meta-segment', row.format),
-      createNode('span', 'meta-segment', formatScale(row.scale)),
       createNode('span', getMetricClass('metric-cell meta-segment', resultClass), resultLabel),
       createNode('span', getMetricClass('metric-cell meta-segment', compressionState), getCompressionLabel(row)),
     ];
+    if (!isVectorFormat(row.format)) {
+      metaSegments.splice(2, 0, createNode('span', 'meta-segment', formatScale(row.scale)));
+    }
 
     metaSegments.forEach((segment, index) => {
       if (index > 0) {
@@ -4189,7 +4311,8 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       if (totalSize > 0) parts.push(formatBytes(totalSize));
       if (totalBaseline > totalSize && totalSize > 0) parts.push(`${formatBytes(totalBaseline - totalSize)} saved`);
     } else {
-      parts.push(`${state.rows.length} export${state.rows.length === 1 ? '' : 's'}`);
+      const outputCount = getExportOutputCount();
+      parts.push(`${outputCount} export${outputCount === 1 ? '' : 's'}`);
       if (state.isEstimating) parts.push('estimating');
     }
 
@@ -4215,8 +4338,9 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
 
   function lockExportButtonWidth() {
     const hasRows = state.rows.length > 0;
+    const outputCount = getExportOutputCount();
     const labels = [
-      hasRows ? `Export ${state.rows.length}` : 'Export',
+      hasRows && outputCount > 1 ? `Export ${outputCount}` : 'Export',
       ...EXPORT_BUTTON_BUSY_FRAMES.map((frame) => formatExportButtonBusyLabel(frame, 100)),
     ];
     const measuredWidth = labels.reduce(
@@ -4278,7 +4402,8 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     }
 
     if (hasRows) {
-      return `Export ${state.rows.length}`;
+      const outputCount = getExportOutputCount();
+      return outputCount > 1 ? `Export ${outputCount}` : 'Export';
     }
 
     return 'Export';
