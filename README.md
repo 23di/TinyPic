@@ -34,4 +34,15 @@ publish/          — Community listing metadata
 
 ## License
 
-ISC
+This project is licensed under the Creative Commons Attribution-NonCommercial
+4.0 International License (CC BY-NC 4.0).
+
+You may use, copy, modify, and share this project for non-commercial purposes
+only, with attribution to 23di and a link back to this repository.
+
+Commercial use is not permitted without written permission. See [LICENSE](LICENSE)
+for the full license text.
+
+Suggested attribution:
+
+`TinyPic Image Compressor by 23di — https://github.com/23di/TinyPic`

@@ -13,8 +13,8 @@
     "test:ui": "npm run build && playwright test",
     "test:all": "npm run test && npm run test:ui"
   },
-  "author": "",
-  "license": "ISC",
+  "author": "23di",
+  "license": "CC-BY-NC-4.0",
   "description": "Compress and export PNG, JPG, WebP, SVG, and PDF assets locally from Figma",
   "dependencies": {
     "@fe-daily/libimagequant-wasm": "^0.1.1",
