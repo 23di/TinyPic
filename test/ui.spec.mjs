@@ -5,8 +5,14 @@ import { test, expect } from '@playwright/test';
 
 // Installs the mock-plugin harness on window.__h and bootstraps two frames so the
 // Export button is enabled and the ZIP path (>1 output, download mode) is active.
-async function setup(page) {
+async function setup(page, options = {}) {
   await page.goto('/ui.html');
+  if (options.locale) {
+    await page.evaluate((locale) => {
+      localStorage.setItem('tinypic_locale', locale);
+    }, options.locale);
+    await page.reload();
+  }
   await page.waitForFunction(() => !!document.getElementById('exportButton'));
 
   await page.evaluate(() => {
@@ -30,13 +36,122 @@ async function setup(page) {
       type: 'bootstrap',
       state: {},
       nodes: [
-        { id: 'n1', name: 'Icon', pageName: 'Page 1', type: 'FRAME', width: 48, height: 48 },
+        { id: 'n1', name: 'm.youtube.com_watch_v=3mgItdLogl8(Screenshot Mobile) 1@1x', pageName: 'Page 1', type: 'FRAME', width: 48, height: 48 },
         { id: 'n2', name: 'Icon', pageName: 'Page 1', type: 'FRAME', width: 48, height: 48 },
       ],
     });
   });
 
-  await expect(page.locator('#exportButton')).toHaveText('Export 2');
+  if (options.locale) {
+    await expect(page.locator('#exportButton')).not.toHaveText('');
+  } else {
+    await expect(page.locator('#exportButton')).toHaveText('Export 2');
+  }
+}
+
+async function visibleLayoutProblems(page) {
+  return page.evaluate(() => {
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+    const selectors = [
+      'button',
+      'select',
+      '.topbar',
+      '.settings-panel',
+      '.table-panel',
+      '.footer',
+      '.setting-card',
+      '.preset-card',
+      '.settings-nav-btn',
+      '.token-add-btn',
+      '.ghost-btn',
+      '.primary-btn',
+      '.file-name',
+    ];
+
+    return Array.from(document.querySelectorAll(selectors.join(',')))
+      .flatMap((el) => {
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        if (
+          style.display === 'none'
+          || style.visibility === 'hidden'
+          || rect.width <= 0
+          || rect.height <= 0
+        ) {
+          return [];
+        }
+
+        const issues = [];
+        if (rect.left < -1 || rect.right > viewportWidth + 1) {
+          issues.push('viewport');
+        }
+        if (
+          style.overflowX !== 'visible'
+          && style.whiteSpace === 'nowrap'
+          && el.scrollWidth > el.clientWidth + 2
+        ) {
+          issues.push('clipped');
+        }
+
+        return issues.length
+          ? [{
+            tag: el.tagName.toLowerCase(),
+            className: el.className,
+            text: (el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 80),
+            issues,
+            rect: {
+              left: Math.round(rect.left),
+              right: Math.round(rect.right),
+              top: Math.round(rect.top),
+              bottom: Math.round(rect.bottom),
+            },
+          }]
+          : [];
+      });
+  });
+}
+
+async function visibleFileRowOverlaps(page) {
+  return page.evaluate(() => {
+    const previewRect = document.querySelector('.preview-shell')?.getBoundingClientRect();
+    if (!previewRect) return [];
+    return Array.from(document.querySelectorAll('.file-name, .file-meta'))
+      .flatMap((el) => {
+        const rect = el.getBoundingClientRect();
+        const intersectsPreview = rect.left < previewRect.right
+          && rect.right > previewRect.left
+          && rect.top < previewRect.bottom
+          && rect.bottom > previewRect.top;
+        return intersectsPreview
+          ? [{
+            className: el.className,
+            text: (el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 80),
+            rect: {
+              left: Math.round(rect.left),
+              right: Math.round(rect.right),
+              top: Math.round(rect.top),
+              bottom: Math.round(rect.bottom),
+            },
+            preview: {
+              left: Math.round(previewRect.left),
+              right: Math.round(previewRect.right),
+              top: Math.round(previewRect.top),
+              bottom: Math.round(previewRect.bottom),
+            },
+          }]
+          : [];
+      });
+  });
+}
+
+async function visibleFileRowGap(page) {
+  return page.evaluate(() => {
+    const previewRect = document.querySelector('.preview-shell')?.getBoundingClientRect();
+    const nameRect = document.querySelector('.file-name')?.getBoundingClientRect();
+    if (!previewRect || !nameRect) return null;
+    return Math.round(nameRect.left - previewRect.right);
+  });
 }
 
 test.beforeEach(async ({ page }) => {
@@ -221,4 +336,34 @@ test('a failed estimate renders "Ready", never the literal "null" (TP-17)', asyn
   expect(out.error).toBeFalsy();
   expect(out.text).toMatch(/\bReady\b/);
   expect(out.text).not.toMatch(/(^|\s)null(\s|$)/);
+});
+
+test('all supported Figma locales render without visible layout overflow', async ({ page }) => {
+  const locales = [
+    ['en', 'Settings'],
+    ['ja', '設定'],
+    ['ko', '설정'],
+    ['fr', 'Paramètres'],
+    ['de', 'Einstellungen'],
+    ['es-ES', 'Ajustes'],
+    ['es-419', 'Ajustes'],
+    ['pt-BR', 'Configurações'],
+  ];
+
+  for (const [locale, settingsTitle] of locales) {
+    await setup(page, { locale });
+    expect(await visibleLayoutProblems(page), locale).toEqual([]);
+    expect(await visibleFileRowOverlaps(page), `${locale}: file row overlap`).toEqual([]);
+    expect(await visibleFileRowGap(page), `${locale}: file row gap`).toBe(16);
+
+    await page.locator('#settingsToggleButton').click();
+    await expect(page.locator('.settings-header-title')).toHaveText(settingsTitle);
+    expect(await visibleLayoutProblems(page), `${locale}: settings defaults`).toEqual([]);
+
+    const tabCount = await page.locator('.settings-nav-btn').count();
+    for (let index = 0; index < tabCount; index += 1) {
+      await page.locator('.settings-nav-btn').nth(index).click();
+      expect(await visibleLayoutProblems(page), `${locale}: tab ${index}`).toEqual([]);
+    }
+  }
 });

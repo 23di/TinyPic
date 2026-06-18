@@ -6,15 +6,55 @@ import { PDFDocument } from 'pdf-lib';
 import {
   OPEN_SOURCE_LIBRARIES,
 } from './open-source-libraries.js';
+import {
+  AUTO_LOCALE,
+  LOCALE_STORAGE_KEY,
+  getLocaleOptions,
+  normalizeLocalePreference,
+  resolveLocalePreference,
+  t,
+  tp,
+} from './i18n.js';
 import RasterExportWorker from './raster-export-worker.js?worker&inline';
 
 (function () {
+  let activeLocale = resolveLocalePreference(loadLocalePreference());
+
+  function tr(key, params) {
+    return t(activeLocale, key, params);
+  }
+
+  function trp(key, count, params) {
+    return tp(activeLocale, key, count, params);
+  }
+
+  function loadLocalePreference() {
+    try {
+      return localStorage.getItem(LOCALE_STORAGE_KEY) || AUTO_LOCALE;
+    } catch {
+      return AUTO_LOCALE;
+    }
+  }
+
+  function saveLocalePreference(preference) {
+    try {
+      localStorage.setItem(LOCALE_STORAGE_KEY, normalizeLocalePreference(preference));
+    } catch {
+      // ignore storage failures
+    }
+  }
+
+  function syncActiveLocale() {
+    activeLocale = resolveLocalePreference(state.settings.locale);
+    document.documentElement.lang = activeLocale;
+  }
+
   const FORMAT_OPTIONS = [
-    { value: 'PNG', label: 'PNG' },
-    { value: 'JPG', label: 'JPG' },
-    { value: 'WEBP', label: 'WebP' },
-    { value: 'SVG', label: 'SVG' },
-    { value: 'PDF', label: 'PDF' },
+    { value: 'PNG', labelKey: 'format.PNG' },
+    { value: 'JPG', labelKey: 'format.JPG' },
+    { value: 'WEBP', labelKey: 'format.WEBP' },
+    { value: 'SVG', labelKey: 'format.SVG' },
+    { value: 'PDF', labelKey: 'format.PDF' },
   ];
   const SVG_SVGO_PLUGIN_KEYS = [
     'cleanupAttrs',
@@ -137,8 +177,6 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     PNG: [
       {
         value: 'original',
-        label: 'Original files',
-        hint: 'Downloads the original Figma file without resizing or post-processing when a single source asset is found.',
         settings: {
           alphaEnabled: true,
           quantizeEnabled: false,
@@ -153,8 +191,6 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       },
       {
         value: 'balanced',
-        label: 'Lossless',
-        hint: 'Lossless recompression with transparent-pixel cleanup.',
         settings: {
           alphaEnabled: true,
           quantizeEnabled: false,
@@ -169,8 +205,6 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       },
       {
         value: 'ui-png',
-        label: 'Crisp',
-        hint: 'Palette PNG for icons and flat UI art with minimal dithering.',
         settings: {
           alphaEnabled: true,
           quantizeEnabled: true,
@@ -185,8 +219,6 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       },
       {
         value: 'web',
-        label: 'Web',
-        hint: 'Palette PNG tuned for typical web delivery.',
         settings: {
           alphaEnabled: true,
           quantizeEnabled: true,
@@ -201,8 +233,6 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       },
       {
         value: 'smallest',
-        label: 'Smallest',
-        hint: 'More aggressive palette reduction for minimum size.',
         settings: {
           alphaEnabled: true,
           quantizeEnabled: true,
@@ -217,16 +247,14 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       },
     ],
     JPG: [
-      { value: 'photo-high', label: 'High', settings: { quality: 92 } },
-      { value: 'photo-balanced', label: 'Balanced', settings: { quality: 84 } },
-      { value: 'web-jpg', label: 'Web', settings: { quality: 74 } },
-      { value: 'preview-jpg', label: 'Preview', settings: { quality: 62 } },
+      { value: 'photo-high', settings: { quality: 92 } },
+      { value: 'photo-balanced', settings: { quality: 84 } },
+      { value: 'web-jpg', settings: { quality: 74 } },
+      { value: 'preview-jpg', settings: { quality: 62 } },
     ],
     WEBP: [
       {
         value: 'lossless-webp',
-        label: 'Lossless',
-        hint: 'True lossless WebP with preserved transparency.',
         settings: {
           quality: 100,
           lossless: true,
@@ -234,8 +262,6 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       },
       {
         value: 'balanced-webp',
-        label: 'Balanced',
-        hint: 'Balanced WebP for general-purpose delivery.',
         settings: {
           quality: 84,
           lossless: false,
@@ -243,8 +269,6 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       },
       {
         value: 'web-webp',
-        label: 'Web',
-        hint: 'Smaller WebP tuned for typical web usage.',
         settings: {
           quality: 74,
           lossless: false,
@@ -252,8 +276,6 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       },
       {
         value: 'preview-webp',
-        label: 'Preview',
-        hint: 'Aggressive lossy WebP for previews and quick sharing.',
         settings: {
           quality: 62,
           lossless: false,
@@ -263,8 +285,6 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     SVG: [
       {
         value: 'editable-svg',
-        label: 'Editable',
-        hint: 'Keeps structure readable and applies light SVGO cleanup only.',
         settings: {
           svgOutlineText: false,
           svgIdAttribute: true,
@@ -278,8 +298,6 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       },
       {
         value: 'clean-svg',
-        label: 'Clean',
-        hint: 'Balanced SVG delivery preset with broader SVGO cleanup and preserved viewBox.',
         settings: {
           svgOutlineText: false,
           svgIdAttribute: false,
@@ -293,8 +311,6 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       },
       {
         value: 'outlined-svg',
-        label: 'Outlined',
-        hint: 'Outlines text in Figma first, then runs a more aggressive SVG cleanup pass.',
         settings: {
           svgOutlineText: true,
           svgIdAttribute: false,
@@ -310,7 +326,6 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     PDF: [
       {
         value: 'document-pdf',
-        label: 'Document',
         settings: {
           contentsOnly: true,
           useAbsoluteBounds: false,
@@ -319,7 +334,6 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       },
       {
         value: 'review-pdf',
-        label: 'Review',
         settings: {
           contentsOnly: true,
           useAbsoluteBounds: true,
@@ -328,7 +342,6 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       },
       {
         value: 'print-pdf',
-        label: 'Print',
         settings: {
           contentsOnly: false,
           useAbsoluteBounds: true,
@@ -366,6 +379,24 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     );
   }
 
+  function getFormatLabel(format) {
+    return tr(`format.${normalizeFormat(format)}`);
+  }
+
+  function getPresetLabel(format, definition) {
+    return tr(`preset.${normalizeFormat(format)}.${definition.value}.label`);
+  }
+
+  function getPresetHint(format, definition) {
+    const key = `preset.${normalizeFormat(format)}.${definition.value}.hint`;
+    const value = tr(key);
+    return value === key ? '' : value;
+  }
+
+  function getTemplateVarLabel(item) {
+    return tr(item.labelKey || `template.var.${item.key}`);
+  }
+
   function formatSvgoPluginLabel(key) {
     return key
       .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
@@ -400,17 +431,17 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     { type: 'var', key: 'date' },
   ];
   const NAME_TEMPLATE_VARS = [
-    { key: 'name', label: 'Frame name' },
-    { key: 'page', label: 'Page name' },
-    { key: 'scale', label: 'Scale' },
-    { key: 'width', label: 'Width' },
-    { key: 'height', label: 'Height' },
-    { key: 'date', label: 'Date' },
-    { key: 'time', label: 'Time' },
+    { key: 'name', labelKey: 'template.var.name' },
+    { key: 'page', labelKey: 'template.var.page' },
+    { key: 'scale', labelKey: 'template.var.scale' },
+    { key: 'width', labelKey: 'template.var.width' },
+    { key: 'height', labelKey: 'template.var.height' },
+    { key: 'date', labelKey: 'template.var.date' },
+    { key: 'time', labelKey: 'template.var.time' },
   ];
   const ARCHIVE_NAME_TEMPLATE_VARS = [
     ...NAME_TEMPLATE_VARS,
-    { key: 'count', label: 'Count' },
+    { key: 'count', labelKey: 'template.var.count' },
   ];
   const VALID_TEMPLATE_VAR_KEYS = new Set(['name', 'page', 'scale', 'width', 'height', 'date', 'time']);
   const VALID_ARCHIVE_TEMPLATE_VAR_KEYS = new Set([...VALID_TEMPLATE_VAR_KEYS, 'count']);
@@ -418,6 +449,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     autoEstimateSize: true,
     closeAfterExport: false,
     exportConcurrency: 3,
+    locale: loadLocalePreference(),
     nameTemplate: DEFAULT_NAME_TEMPLATE,
     archiveNameTemplate: DEFAULT_ARCHIVE_NAME_TEMPLATE,
     preserveFolderStructure: true,
@@ -429,10 +461,11 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     scale: 1,
   };
   const SETTINGS_GENERAL_TABS = [
-    { value: 'defaults', label: 'Defaults' },
-    { value: 'export', label: 'Export' },
-    { value: 'data', label: 'Data' },
-    { value: 'libraries', label: 'Libraries' },
+    { value: 'defaults', labelKey: 'tab.defaults' },
+    { value: 'export', labelKey: 'tab.export' },
+    { value: 'language', labelKey: 'tab.language' },
+    { value: 'data', labelKey: 'tab.data' },
+    { value: 'libraries', labelKey: 'tab.libraries' },
   ];
   const EXPORT_BUTTON_BUSY_FRAMES = [
     '✱', '✲', '✳', '✴', '✳', '✲', '✱', '✲', '✳', '✴', '✳', '✲',
@@ -535,11 +568,13 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     settingsNavTabs: document.getElementById('settingsNavTabs'),
     defaultsSection: document.getElementById('defaultsSection'),
     exportSettingsSection: document.getElementById('exportSettingsSection'),
+    languageSection: document.getElementById('languageSection'),
     settingsDataSection: document.getElementById('settingsDataSection'),
     openSourceSection: document.getElementById('openSourceSection'),
     presetEditorSection: document.getElementById('presetEditorSection'),
     defaultsControls: document.getElementById('defaultsControls'),
     exportSettingsControls: document.getElementById('exportSettingsControls'),
+    languageControls: document.getElementById('languageControls'),
     settingsDataControls: document.getElementById('settingsDataControls'),
     openSourceControls: document.getElementById('openSourceControls'),
     settingsImportInput: document.getElementById('settingsImportInput'),
@@ -720,12 +755,12 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
 
     settleRasterExportRequest(message.requestId, {
       ok: false,
-      error: typeof message.error === 'string' ? message.error : 'Worker compression failed.',
+      error: typeof message.error === 'string' ? message.error : tr('error.workerCompression'),
     });
   }
 
   function rejectAllRasterExportRequests(message) {
-    const errorMessage = typeof message === 'string' && message ? message : 'Worker compression failed.';
+    const errorMessage = typeof message === 'string' && message ? message : tr('error.workerCompression');
     pendingRasterExportRequests.forEach((pending, requestId) => {
       pending.reject(new Error(errorMessage));
       pendingRasterExportRequests.delete(requestId);
@@ -747,13 +782,15 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
 
   function handleRasterExportWorkerError(event) {
     rejectAllRasterExportRequests(
-      event && event.message ? `Worker compression failed. ${event.message}` : 'Worker compression failed.',
+      event && event.message
+        ? tr('error.workerCompressionMessage', { message: event.message })
+        : tr('error.workerCompression'),
     );
     teardownRasterExportWorker();
   }
 
   function handleRasterExportWorkerMessageError() {
-    rejectAllRasterExportRequests('Worker compression failed while receiving a response.');
+    rejectAllRasterExportRequests(tr('error.workerResponse'));
     teardownRasterExportWorker();
   }
 
@@ -851,7 +888,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       ...leadingTabs,
       ...FORMAT_OPTIONS.map((option) => ({
         value: option.value,
-        label: option.label,
+        label: getFormatLabel(option.value),
       })),
       ...trailingTabs,
     ];
@@ -1144,6 +1181,9 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
           : DEFAULT_SETTINGS.autoEstimateSize,
         closeAfterExport: Boolean(safeSettings.closeAfterExport),
         exportConcurrency: normalizeExportConcurrency(safeSettings.exportConcurrency),
+        locale: normalizeLocalePreference(
+          safeSettings.locale !== undefined ? safeSettings.locale : loadLocalePreference(),
+        ),
         nameTemplate: Array.isArray(safeSettings.nameTemplate)
           ? normalizeNameTemplate(safeSettings.nameTemplate)
           : (() => {
@@ -1302,10 +1342,10 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
 
   function formatBytes(bytes) {
     if (bytes === null) {
-      return 'Failed';
+      return tr('status.failed');
     }
     if (bytes === undefined) {
-      return 'Estimating...';
+      return tr('status.estimatingSize');
     }
     if (bytes < 1024) {
       return `${bytes} B`;
@@ -1318,7 +1358,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
 
   function toErrorMessage(error) {
     if (!error) {
-      return 'Unknown error';
+      return tr('error.unknown');
     }
     if (typeof error === 'string') {
       return error;
@@ -1326,24 +1366,24 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     if (typeof error.message === 'string') {
       return error.message;
     }
-    return 'Unknown error';
+    return tr('error.unknown');
   }
 
   function formatPngDitheringLabel(value) {
     const normalized = normalizeClosestOption(value, PNG_DITHERING_OPTIONS, 0);
     if (normalized === 0) {
-      return 'Off';
+      return tr('dither.off');
     }
     if (normalized === 0.15) {
-      return 'Low';
+      return tr('dither.low');
     }
     if (normalized === 0.35) {
-      return 'Soft';
+      return tr('dither.soft');
     }
     if (normalized === 0.65) {
-      return 'Medium';
+      return tr('dither.medium');
     }
-    return 'Strong';
+    return tr('dither.strong');
   }
 
   function isAbortError(error) {
@@ -1353,7 +1393,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
   function createBrowserDownloadTarget() {
     return {
       mode: 'browser-download',
-      label: 'browser downloads',
+      label: tr('delivery.browserDownloads'),
       usedNames: new Set(),
       namingLock: Promise.resolve(),
     };
@@ -1362,7 +1402,9 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
   function createDirectoryExportTarget(directoryHandle) {
     return {
       mode: 'directory',
-      label: directoryHandle && directoryHandle.name ? `folder "${directoryHandle.name}"` : 'the selected folder',
+      label: directoryHandle && directoryHandle.name
+        ? tr('delivery.folderName', { name: directoryHandle.name })
+        : tr('delivery.selectedFolder'),
       directoryHandle,
       usedNames: new Set(),
       namingLock: Promise.resolve(),
@@ -1381,7 +1423,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
 
     const permission = await directoryHandle.requestPermission({ mode: 'readwrite' });
     if (permission !== 'granted') {
-      throw new Error('Write access to the selected folder was denied.');
+      throw new Error(tr('error.folderDenied'));
     }
   }
 
@@ -1647,7 +1689,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     const bytes = await mergePdfFiles(buffer.files);
     const blob = new Blob([bytes], { type: 'application/pdf' });
     if (!blob.size) {
-      throw new Error('Merged PDF creation failed: the file payload is empty.');
+      throw new Error(tr('error.pdfEmpty'));
     }
 
     await deliverExportFile(buffer.fileName || 'frame-export.pdf', blob);
@@ -1865,6 +1907,10 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       state.settings.closeAfterExport = Boolean(value);
     } else if (key === 'exportConcurrency') {
       state.settings.exportConcurrency = normalizeExportConcurrency(value);
+    } else if (key === 'locale') {
+      state.settings.locale = normalizeLocalePreference(value);
+      saveLocalePreference(state.settings.locale);
+      syncActiveLocale();
     } else if (key === 'nameTemplate') {
       state.settings.nameTemplate = normalizeNameTemplate(value);
     } else if (key === 'archiveNameTemplate') {
@@ -1987,6 +2033,8 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     const nextState = normalizeIncomingState(rawState);
     state.defaults = nextState.defaults;
     state.settings = nextState.settings;
+    saveLocalePreference(state.settings.locale);
+    syncActiveLocale();
     state.presetSettings = nextState.presetSettings;
     state.profiles = nextState.profiles;
     state.settingsTab = normalizeSettingsTab(state.settingsTab);
@@ -1998,14 +2046,18 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     render();
     persistStateSoon();
     scheduleEstimate(120);
-    updateFooterStatus(sourceLabel ? `Settings imported from ${sourceLabel}.` : 'Settings imported.');
+    updateFooterStatus(
+      sourceLabel
+        ? tr('status.settingsImportedFrom', { source: sourceLabel })
+        : tr('status.settingsImported'),
+    );
   }
 
   function exportSettingsToFile() {
     const payload = JSON.stringify(getSerializableSettingsState(), null, 2);
     const blob = new Blob([payload], { type: 'application/json' });
     downloadBlob('tinypic-image-compressor-settings.json', blob);
-    updateFooterStatus('Settings exported to JSON.');
+    updateFooterStatus(tr('status.settingsExported'));
   }
 
   function resetAllSettings() {
@@ -2019,7 +2071,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       presetSettings: createDefaultPresetSettings(),
       profiles: [createDefaultProfile()],
     });
-    updateFooterStatus('Settings reset to defaults.');
+    updateFooterStatus(tr('status.settingsReset'));
   }
 
   function revokeRemovedPreviews(nextFrames) {
@@ -2124,7 +2176,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       const image = await new Promise((resolve, reject) => {
         const element = new Image();
         element.onload = () => resolve(element);
-        element.onerror = () => reject(new Error('Failed to decode raster source.'));
+        element.onerror = () => reject(new Error(tr('error.decodeRaster')));
         element.src = url;
       });
 
@@ -2149,7 +2201,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
 
     const ctx = canvas.getContext('2d');
     if (!ctx) {
-      throw new Error('Canvas context is not available.');
+      throw new Error(tr('error.canvasContext'));
     }
 
     if (fillBackground) {
@@ -2165,7 +2217,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     return new Promise((resolve, reject) => {
       canvas.toBlob((blob) => {
         if (!blob) {
-          reject(new Error('Canvas export returned an empty blob.'));
+          reject(new Error(tr('error.canvasEmpty')));
           return;
         }
         resolve(blob);
@@ -2267,7 +2319,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
 
   async function writeBlobToDirectory(target, fileName, blob) {
     if (!target || target.mode !== 'directory' || !target.directoryHandle) {
-      throw new Error('No export folder is available.');
+      throw new Error(tr('error.noFolder'));
     }
 
     let dirHandle = target.directoryHandle;
@@ -2327,13 +2379,13 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     if (activeExportTarget && activeExportTarget.mode === 'directory') {
       await writeBlobToDirectory(activeExportTarget, fileName, blob);
       return {
-        detail: `Saved to ${activeExportTarget.label}.`,
+        detail: tr('delivery.savedTo', { target: activeExportTarget.label }),
       };
     }
 
     downloadBlob(fileName, blob);
     return {
-      detail: 'Download queued in browser.',
+      detail: tr('delivery.browserQueued'),
     };
   }
 
@@ -2482,7 +2534,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
 
     const result = await resultPromise;
     if (!result.ok) {
-      throw new Error(result.error || 'Worker compression failed.');
+      throw new Error(result.error || tr('error.workerCompression'));
     }
 
     return {
@@ -2494,7 +2546,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
   async function prepareDownloadPayload(message) {
     const sourceBytes = toUint8Array(message.bytes);
     if (!sourceBytes.byteLength) {
-      throw new Error('UI received an empty file payload.');
+      throw new Error(tr('error.emptyPayload'));
     }
 
     if (message.skipProcessing) {
@@ -2574,7 +2626,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       const payload = await prepareDownloadPayload(message);
       const blob = new Blob([payload.bytes], { type: payload.mimeType || 'application/octet-stream' });
       if (!blob.size) {
-        throw new Error('Blob creation failed: the file payload is empty.');
+        throw new Error(tr('error.emptyBlob'));
       }
 
       if (zipBuffer) {
@@ -2585,7 +2637,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
         zipBuffer.files.push({ fileName: entryName, bytes: payload.bytes });
         return {
           ok: true,
-          detail: 'Buffered for ZIP.',
+          detail: tr('delivery.bufferedZip'),
           bytesLength: payload.bytes.byteLength,
         };
       }
@@ -2598,7 +2650,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
         });
         return {
           ok: true,
-          detail: 'Buffered for merged PDF.',
+          detail: tr('delivery.bufferedPdf'),
           bytesLength: payload.bytes.byteLength,
         };
       }
@@ -2639,7 +2691,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     const config = options && typeof options === 'object' ? options : {};
     const label = typeof config.label === 'string' && config.label
       ? config.label
-      : 'Filename template';
+      : tr('template.filename');
     const availableVars = Array.isArray(config.availableVars) && config.availableVars.length > 0
       ? config.availableVars
       : NAME_TEMPLATE_VARS;
@@ -2683,7 +2735,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
         state.settings.preserveFolderStructure !== false,
       );
       const ext = getFormatExtension(exampleRow.format);
-      preview.textContent = `Preview: ${path}.${ext}`;
+      preview.textContent = tr('template.preview', { value: `${path}.${ext}` });
     }
 
     let pointerDrag = null;
@@ -3017,8 +3069,8 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
           const handle = document.createElement('button');
           handle.className = 'token-chip-handle';
           handle.type = 'button';
-          handle.title = 'Drag to reorder';
-          handle.setAttribute('aria-label', 'Drag to reorder');
+          handle.title = tr('template.drag');
+          handle.setAttribute('aria-label', tr('template.drag'));
           handle.textContent = '::';
           handle.addEventListener('pointerdown', (event) => {
             handleTokenHandlePointerDown(event, index, chip);
@@ -3072,7 +3124,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
             removeBtn.className = 'token-chip-remove';
             removeBtn.type = 'button';
             removeBtn.tabIndex = 0;
-            removeBtn.title = 'Remove';
+            removeBtn.title = tr('template.remove');
             removeBtn.textContent = '×';
             removeBtn.addEventListener('click', () => {
               tokens.splice(index, 1);
@@ -3089,7 +3141,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
           const removeBtn = document.createElement('button');
           removeBtn.className = 'token-chip-remove';
           removeBtn.type = 'button';
-          removeBtn.title = 'Remove';
+          removeBtn.title = tr('template.remove');
           removeBtn.textContent = '×';
           removeBtn.addEventListener('click', () => {
             tokens.splice(index, 1);
@@ -3111,10 +3163,11 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
 
     const addRow = createNode('div', 'token-add-row');
 
-    availableVars.forEach(({ key, label: tokenLabel }) => {
+    availableVars.forEach((item) => {
+      const { key } = item;
       const btn = createNode('button', 'token-add-btn');
       btn.type = 'button';
-      btn.textContent = `+ ${tokenLabel}`;
+      btn.textContent = `+ ${getTemplateVarLabel(item)}`;
       btn.disabled = disabled;
       btn.addEventListener('click', () => {
         tokens.push({ type: 'var', key });
@@ -3125,7 +3178,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
 
     const textBtn = createNode('button', 'token-add-btn');
     textBtn.type = 'button';
-    textBtn.textContent = '+ Custom text';
+    textBtn.textContent = `+ ${tr('template.customText')}`;
     textBtn.disabled = disabled;
     textBtn.addEventListener('click', () => {
       tokens.push({ type: 'text', value: customTextValue });
@@ -3206,24 +3259,24 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
 
   function createActionCard() {
     const card = createNode('div', 'setting-card action-card');
-    const labelNode = createNode('span', 'setting-card-label', 'Settings file');
-    const note = createNode('p', 'inline-note', 'JSON includes defaults, the main export row, and preset overrides.');
+    const labelNode = createNode('span', 'setting-card-label', tr('settings.file'));
+    const note = createNode('p', 'inline-note', tr('settings.fileNote'));
     const actions = createNode('div', 'action-row');
     const controlsDisabled = state.isExporting;
 
-    const exportButton = createNode('button', 'ghost-btn', 'Export JSON');
+    const exportButton = createNode('button', 'ghost-btn', tr('settings.exportJson'));
     exportButton.type = 'button';
     exportButton.disabled = controlsDisabled;
     exportButton.addEventListener('click', exportSettingsToFile);
 
-    const importButton = createNode('button', 'ghost-btn', 'Import JSON');
+    const importButton = createNode('button', 'ghost-btn', tr('settings.importJson'));
     importButton.type = 'button';
     importButton.disabled = controlsDisabled;
     importButton.addEventListener('click', () => {
       dom.settingsImportInput.click();
     });
 
-    const resetButton = createNode('button', 'ghost-btn', 'Reset all');
+    const resetButton = createNode('button', 'ghost-btn', tr('settings.resetAll'));
     resetButton.type = 'button';
     resetButton.disabled = controlsDisabled;
     resetButton.addEventListener('click', resetAllSettings);
@@ -3254,8 +3307,8 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       'span',
       'library-meta-chip',
       library.noticeFiles.length
-        ? `Notice files: ${library.noticeFiles.join(', ')}`
-        : 'No embedded LICENSE file found',
+        ? tr('library.noticeFiles', { files: library.noticeFiles.join(', ') })
+        : tr('library.noNotice'),
     );
     metaRow.append(noticeLabel);
     card.append(metaRow);
@@ -3264,11 +3317,11 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     linkRow.append(createExternalLink('npm', library.packageUrl));
 
     if (library.repositoryUrl) {
-      linkRow.append(createExternalLink('Repository', library.repositoryUrl));
+      linkRow.append(createExternalLink(tr('library.repository'), library.repositoryUrl));
     }
 
     if (library.homepageUrl && library.homepageUrl !== library.repositoryUrl) {
-      linkRow.append(createExternalLink('Homepage', library.homepageUrl));
+      linkRow.append(createExternalLink(tr('library.homepage'), library.homepageUrl));
     }
 
     card.append(linkRow);
@@ -3332,14 +3385,14 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     const controlsDisabled = state.isExporting;
     const cards = [
       createSelectSettingCard(
-        'Default format',
-        FORMAT_OPTIONS.map((option) => ({ value: option.value, label: option.label })),
+        tr('settings.defaultFormat'),
+        FORMAT_OPTIONS.map((option) => ({ value: option.value, label: getFormatLabel(option.value) })),
         state.defaults.format,
         setDefaultFormat,
         controlsDisabled,
       ),
       createSelectSettingCard(
-        'Default scale',
+        tr('settings.defaultScale'),
         SCALE_OPTIONS.map((value) => ({ value: String(value), label: formatScale(value) })),
         String(state.defaults.scale),
         setDefaultScale,
@@ -3349,10 +3402,10 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
 
     FORMAT_OPTIONS.forEach((option) => {
       const presetCard = createSelectSettingCard(
-          `${option.label} preset`,
+          tr('settings.formatPreset', { format: getFormatLabel(option.value) }),
           getPresetDefinitions(option.value).map((definition) => ({
             value: definition.value,
-            label: definition.label,
+            label: getPresetLabel(option.value, definition),
           })),
           getDefaultPresetForFormat(state.defaults, option.value),
           (value) => setDefaultPresetForFormat(option.value, value),
@@ -3363,6 +3416,19 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     });
 
     dom.defaultsControls.replaceChildren(...cards);
+  }
+
+  function renderLanguageControls() {
+    const controlsDisabled = state.isExporting;
+    dom.languageControls.replaceChildren(
+      createSelectSettingCard(
+        tr('settings.language'),
+        getLocaleOptions(activeLocale),
+        state.settings.locale,
+        (value) => updateExportSetting('locale', value),
+        controlsDisabled,
+      ),
+    );
   }
 
   function renderExportSettingsControls() {
@@ -3380,43 +3446,45 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
         (nextTemplate) => updateExportSetting('archiveNameTemplate', nextTemplate),
         controlsDisabled,
         {
-          label: 'Archive name',
+          label: tr('template.archive'),
           availableVars: ARCHIVE_NAME_TEMPLATE_VARS,
           extensionLabel: '.zip',
           customTextValue: 'Images ',
-          buildPreviewText: (tokens) => `Preview: ${buildArchiveFileName(
-            tokens,
-            new Date(),
-            {
-              ...(state.rows[0] || {}),
-              count: state.rows.length,
-            },
-          )}`,
+          buildPreviewText: (tokens) => tr('template.preview', {
+            value: buildArchiveFileName(
+              tokens,
+              new Date(),
+              {
+                ...(state.rows[0] || {}),
+                count: state.rows.length,
+              },
+            ),
+          }),
         },
       ),
       createToggleSettingCard(
-        'Preserve folder structure',
+        tr('settings.preserveFolders'),
         state.settings.preserveFolderStructure !== false,
         (checked) => updateExportSetting('preserveFolderStructure', checked),
         controlsDisabled,
       ),
       createToggleSettingCard(
-        'Auto estimate size',
+        tr('settings.autoEstimate'),
         state.settings.autoEstimateSize,
         (checked) => updateExportSetting('autoEstimateSize', checked),
         controlsDisabled,
       ),
       createToggleSettingCard(
-        'Close after export',
+        tr('settings.closeAfterExport'),
         state.settings.closeAfterExport,
         (checked) => updateExportSetting('closeAfterExport', checked),
         controlsDisabled,
       ),
       createSelectSettingCard(
-        'Concurrency',
+        tr('settings.concurrency'),
         EXPORT_CONCURRENCY_OPTIONS.map((value) => ({
           value: String(value),
-          label: `${value} at a time`,
+          label: tr('settings.atATime', { count: value }),
         })),
         String(state.settings.exportConcurrency),
         (value) => updateExportSetting('exportConcurrency', value),
@@ -3458,7 +3526,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
         setSettingsTab(item.value);
       });
 
-      button.appendChild(createNode('span', 'settings-nav-title', item.label));
+      button.appendChild(createNode('span', 'settings-nav-title', item.label || tr(item.labelKey)));
       fragment.appendChild(button);
     });
 
@@ -3471,6 +3539,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
 
     dom.defaultsSection.hidden = activeTab !== 'defaults';
     dom.exportSettingsSection.hidden = activeTab !== 'export';
+    dom.languageSection.hidden = activeTab !== 'language';
     dom.settingsDataSection.hidden = activeTab !== 'data';
     dom.openSourceSection.hidden = activeTab !== 'libraries';
     dom.presetEditorSection.hidden = !isPresetSettingsTab(activeTab);
@@ -3487,11 +3556,11 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     const head = createNode('div', 'preset-card-head');
     const toggleButton = createNode('button', 'preset-card-toggle');
     toggleButton.type = 'button';
-    const title = createNode('h3', 'preset-card-title', definition.label);
+    const title = createNode('h3', 'preset-card-title', getPresetLabel(format, definition));
     const chevron = createNode('span', 'preset-card-chevron');
     chevron.setAttribute('aria-hidden', 'true');
     chevron.appendChild(createChevronIcon());
-    const resetButton = createNode('button', 'ghost-btn preset-card-reset', 'Reset');
+    const resetButton = createNode('button', 'ghost-btn preset-card-reset', tr('settings.reset'));
     resetButton.type = 'button';
     resetButton.disabled = controlsDisabled;
     resetButton.addEventListener('click', (e) => {
@@ -3513,8 +3582,9 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
 
     const body = createNode('div', 'preset-card-body');
 
-    if (definition.hint) {
-      body.appendChild(createNode('p', 'inline-note', definition.hint));
+    const presetHint = getPresetHint(format, definition);
+    if (presetHint) {
+      body.appendChild(createNode('p', 'inline-note', presetHint));
     }
 
     const controlGrid = createNode('div', 'preset-control-grid');
@@ -3523,7 +3593,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       const quantizeControlDisabled = controlsDisabled || !presetSettings.quantizeEnabled;
       controlGrid.appendChild(
         createPresetToggleControl(
-          'Alpha channel',
+          tr('control.alpha'),
           presetSettings.alphaEnabled !== false,
           (checked) => updatePresetSetting(format, definition.value, 'alphaEnabled', checked),
           controlsDisabled,
@@ -3531,7 +3601,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       );
       controlGrid.appendChild(
         createPresetToggleControl(
-          'Palette reduction',
+          tr('control.palette'),
           Boolean(presetSettings.quantizeEnabled),
           (checked) => updatePresetSetting(format, definition.value, 'quantizeEnabled', checked),
           controlsDisabled,
@@ -3539,7 +3609,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       );
       controlGrid.appendChild(
         createPresetSelectControl(
-          'Max colors',
+          tr('control.maxColors'),
           PNG_MAX_COLOR_OPTIONS.map((value) => ({ value: String(value), label: `${value}` })),
           String(presetSettings.maxColors || 256),
           (value) => updatePresetSetting(format, definition.value, 'maxColors', value),
@@ -3548,7 +3618,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       );
       controlGrid.appendChild(
         createPresetSelectControl(
-          'Minimum quality',
+          tr('control.minQuality'),
           PNG_QUALITY_OPTIONS.map((value) => ({ value: String(value), label: `${value}%` })),
           String(presetSettings.qualityMin || 84),
           (value) => updatePresetSetting(format, definition.value, 'qualityMin', value),
@@ -3557,7 +3627,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       );
       controlGrid.appendChild(
         createPresetSelectControl(
-          'Target quality',
+          tr('control.targetQuality'),
           PNG_QUALITY_OPTIONS.map((value) => ({ value: String(value), label: `${value}%` })),
           String(presetSettings.qualityTarget || 95),
           (value) => updatePresetSetting(format, definition.value, 'qualityTarget', value),
@@ -3566,7 +3636,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       );
       controlGrid.appendChild(
         createPresetSelectControl(
-          'Dithering',
+          tr('control.dithering'),
           PNG_DITHERING_OPTIONS.map((value) => ({
             value: String(value),
             label: formatPngDitheringLabel(value),
@@ -3579,7 +3649,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     } else if (format === 'JPG') {
       controlGrid.appendChild(
         createPresetSelectControl(
-          'Quality',
+          tr('control.quality'),
           JPG_QUALITY_OPTIONS.map((value) => ({ value: String(value), label: `${value}` })),
           String(presetSettings.quality || 84),
           (value) => updatePresetSetting(format, definition.value, 'quality', value),
@@ -3590,7 +3660,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       const qualityControlDisabled = controlsDisabled || Boolean(presetSettings.lossless);
       controlGrid.appendChild(
         createPresetToggleControl(
-          'Lossless',
+          tr('control.lossless'),
           Boolean(presetSettings.lossless),
           (checked) => updatePresetSetting(format, definition.value, 'lossless', checked),
           controlsDisabled,
@@ -3598,7 +3668,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       );
       controlGrid.appendChild(
         createPresetSelectControl(
-          'Quality',
+          tr('control.quality'),
           [100, ...JPG_QUALITY_OPTIONS].map((value) => ({ value: String(value), label: `${value}` })),
           String(presetSettings.quality || 74),
           (value) => updatePresetSetting(format, definition.value, 'quality', value),
@@ -3608,7 +3678,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     } else if (format === 'SVG') {
       controlGrid.appendChild(
         createPresetToggleControl(
-          'Outline text',
+          tr('control.outlineText'),
           Boolean(presetSettings.svgOutlineText),
           (checked) => updatePresetSetting(format, definition.value, 'svgOutlineText', checked),
           controlsDisabled,
@@ -3616,7 +3686,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       );
       controlGrid.appendChild(
         createPresetToggleControl(
-          'ID attributes',
+          tr('control.idAttributes'),
           Boolean(presetSettings.svgIdAttribute),
           (checked) => updatePresetSetting(format, definition.value, 'svgIdAttribute', checked),
           controlsDisabled,
@@ -3624,7 +3694,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       );
       controlGrid.appendChild(
         createPresetToggleControl(
-          'Simplify strokes',
+          tr('control.simplifyStrokes'),
           Boolean(presetSettings.svgSimplifyStroke),
           (checked) => updatePresetSetting(format, definition.value, 'svgSimplifyStroke', checked),
           controlsDisabled,
@@ -3632,7 +3702,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       );
       controlGrid.appendChild(
         createPresetToggleControl(
-          'SVGO enabled',
+          tr('control.svgoEnabled'),
           Boolean(presetSettings.svgoEnabled),
           (checked) => updatePresetSetting(format, definition.value, 'svgoEnabled', checked),
           controlsDisabled,
@@ -3640,7 +3710,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       );
       controlGrid.appendChild(
         createPresetToggleControl(
-          'SVGO multipass',
+          tr('control.svgoMultipass'),
           Boolean(presetSettings.svgoMultipass),
           (checked) => updatePresetSetting(format, definition.value, 'svgoMultipass', checked),
           controlsDisabled || !presetSettings.svgoEnabled,
@@ -3648,7 +3718,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       );
       controlGrid.appendChild(
         createPresetSelectControl(
-          'Float precision',
+          tr('control.floatPrecision'),
           SVG_SVGO_FLOAT_PRECISION_OPTIONS.map((value) => ({
             value: String(value),
             label: `${value}`,
@@ -3660,7 +3730,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       );
       controlGrid.appendChild(
         createPresetTextareaControl(
-          'SVGO override JSON',
+          tr('control.svgoOverride'),
           presetSettings.svgoOverrides || '',
           '{\n  "plugins": [\n    {\n      "name": "prefixIds"\n    }\n  ]\n}',
           (value) => updatePresetSetting(format, definition.value, 'svgoOverrides', value),
@@ -3689,7 +3759,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     } else if (format === 'PDF') {
       controlGrid.appendChild(
         createPresetToggleControl(
-          'Merge into one PDF',
+          tr('control.mergePdf'),
           Boolean(presetSettings.mergePdfs),
           (checked) => updatePresetSetting(format, definition.value, 'mergePdfs', checked),
           controlsDisabled,
@@ -3697,7 +3767,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       );
       controlGrid.appendChild(
         createPresetToggleControl(
-          'Contents only',
+          tr('control.contentsOnly'),
           Boolean(presetSettings.contentsOnly),
           (checked) => updatePresetSetting(format, definition.value, 'contentsOnly', checked),
           controlsDisabled,
@@ -3705,7 +3775,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       );
       controlGrid.appendChild(
         createPresetToggleControl(
-          'Absolute bounds',
+          tr('control.absoluteBounds'),
           Boolean(presetSettings.useAbsoluteBounds),
           (checked) => updatePresetSetting(format, definition.value, 'useAbsoluteBounds', checked),
           controlsDisabled,
@@ -3736,6 +3806,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     const nextState = normalizeIncomingState(message.state || {});
     state.defaults = nextState.defaults;
     state.settings = nextState.settings;
+    syncActiveLocale();
     state.presetSettings = nextState.presetSettings;
     state.profiles = nextState.profiles;
     if (state.profiles[0]) saveProfileToStorage(state.profiles[0]);
@@ -3908,7 +3979,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
         return {
           ...row,
           status: 'error',
-          error: typeof message.detail === 'string' ? message.detail : 'Export failed.',
+          error: typeof message.detail === 'string' ? message.detail : tr('status.failed'),
         };
       }
 
@@ -4004,15 +4075,15 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     if (message.cancelled) {
       updateFooterStatus(
         errors.length
-          ? `Export stopped after ${exported} of ${total} files. ${errors[0]}`
-          : `Export stopped after ${exported} of ${total} files.`,
+          ? tr('status.exportStoppedError', { exported, total, error: errors[0] })
+          : tr('status.exportStopped', { exported, total }),
       );
     } else if (pdfMergeError) {
-      updateFooterStatus(`Export finished, but merged PDF failed. ${pdfMergeError}`);
+      updateFooterStatus(tr('status.pdfMergeFailed', { error: pdfMergeError }));
     } else if (zipError) {
-      updateFooterStatus(`Export finished, but building the ZIP failed. ${zipError}`);
+      updateFooterStatus(tr('status.zipFailed', { error: zipError }));
     } else if (errors.length) {
-      updateFooterStatus(`Export finished with errors. ${errors[0]}`);
+      updateFooterStatus(tr('status.exportErrors', { error: errors[0] }));
     } else {
       updateFooterStatus('');
     }
@@ -4028,7 +4099,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
 
   function getResultText(row) {
     if (row.status === 'error') {
-      return row.error || 'Failed';
+      return row.error || tr('status.failed');
     }
 
     const value = row.exportedBytes !== null ? row.exportedBytes : row.estimateBytes;
@@ -4036,10 +4107,10 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       return formatBytes(value);
     }
     if (row.status === 'processing' || state.isEstimating) {
-      return 'Estimating size';
+      return tr('status.estimatingSize');
     }
     if (value === undefined || value === null) {
-      return 'Ready';
+      return tr('status.ready');
     }
     return String(value);
   }
@@ -4115,7 +4186,10 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
         Math.max(1, Math.round((Number(row.height) || 0) * normalizeScale(row.scale))),
       ));
     }
-    return `${row.name || 'Raster export'} is large${parts.length ? ` (${parts.join(' • ')})` : ''}. PNG/JPG compression may take longer.`;
+    return tr('warning.largeRaster', {
+      name: row.name || tr('warning.defaultRasterName'),
+      details: parts.length ? ` (${parts.join(' • ')})` : '',
+    });
   }
 
   function createWarningBadge(message) {
@@ -4232,6 +4306,19 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     return baseClass;
   }
 
+  function applyStaticTranslations() {
+    document.title = tr('app.title');
+    document.querySelectorAll('[data-i18n]').forEach((node) => {
+      node.textContent = tr(node.dataset.i18n);
+    });
+    document.querySelectorAll('[data-i18n-title]').forEach((node) => {
+      node.setAttribute('title', tr(node.dataset.i18nTitle));
+    });
+    document.querySelectorAll('[data-i18n-aria-label]').forEach((node) => {
+      node.setAttribute('aria-label', tr(node.dataset.i18nAriaLabel));
+    });
+  }
+
   function renderProfileStack() {
     dom.profileStack.replaceChildren();
 
@@ -4245,11 +4332,11 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
 
     const formatField = createNode('label', 'profile-field');
     const formatSelect = document.createElement('select');
-    formatSelect.setAttribute('aria-label', 'Format');
+    formatSelect.setAttribute('aria-label', tr('settings.defaultFormat'));
     FORMAT_OPTIONS.forEach((option) => {
       const node = document.createElement('option');
       node.value = option.value;
-      node.textContent = option.label;
+      node.textContent = getFormatLabel(option.value);
       formatSelect.appendChild(node);
     });
     formatSelect.value = profile.format;
@@ -4261,11 +4348,11 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
 
     const presetField = createNode('label', 'profile-field');
     const presetSelect = document.createElement('select');
-    presetSelect.setAttribute('aria-label', 'Preset');
+    presetSelect.setAttribute('aria-label', tr('settings.formatPreset', { format: getFormatLabel(profile.format) }));
     getPresetDefinitions(profile.format).forEach((definition) => {
       const node = document.createElement('option');
       node.value = definition.value;
-      node.textContent = definition.label;
+      node.textContent = getPresetLabel(profile.format, definition);
       presetSelect.appendChild(node);
     });
     presetSelect.value = profile.preset;
@@ -4281,7 +4368,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     if (profile.format !== 'PDF') {
       const scaleField = createNode('label', 'profile-field');
       scaleSelect = document.createElement('select');
-      scaleSelect.setAttribute('aria-label', 'Scale');
+      scaleSelect.setAttribute('aria-label', tr('template.var.scale'));
       SCALE_OPTIONS.forEach((value) => {
         const node = document.createElement('option');
         node.value = String(value);
@@ -4310,7 +4397,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     const tableRow = document.createElement('tr');
 
     const previewCell = document.createElement('td');
-    previewCell.dataset.label = 'Preview';
+    previewCell.dataset.label = tr('table.preview');
     const preview = createNode('div', 'preview-shell');
     const previewUrl = getFramePreviewUrl(row.nodeId);
     if (previewUrl) {
@@ -4325,16 +4412,16 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
 
     const fileCell = document.createElement('td');
     fileCell.className = 'file-cell';
-    fileCell.dataset.label = 'File';
+    fileCell.dataset.label = tr('table.file');
     const fileContentRow = createNode('div', 'file-content-row');
     const fileStack = createNode('div', 'file-stack');
     const fileName = createNode('p', 'file-name', buildRowFileName(row));
     const fileWarning = getLargeRasterWarningForRow(row);
     const resultText = getResultText(row);
-    const resultLabel = row.status === 'error' ? 'Failed' : resultText;
+    const resultLabel = row.status === 'error' ? tr('status.failed') : resultText;
     const resultClass = row.status === 'error'
       ? 'muted'
-      : resultText === 'Ready' || resultText === 'Estimating size'
+      : resultText === tr('status.ready') || resultText === tr('status.estimatingSize')
         ? 'muted'
         : '';
     const compressionValue = getCompressionValue(row);
@@ -4417,7 +4504,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     });
 
     if (state.rows.length === 0) {
-      dom.footerMeta.textContent = 'Select layers in Figma to begin';
+      dom.footerMeta.textContent = tr('status.selectLayers');
       return;
     }
 
@@ -4426,9 +4513,9 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
 
     if (anyExportActivity) {
       const active = counts.queued + counts.processing;
-      if (active > 0) parts.push(`${active} queued`);
-      if (counts.done > 0) parts.push(`${counts.done} done`);
-      if (counts.error > 0) parts.push(`${counts.error} error${counts.error === 1 ? '' : 's'}`);
+      if (active > 0) parts.push(trp('status.queued', active));
+      if (counts.done > 0) parts.push(trp('status.done', counts.done));
+      if (counts.error > 0) parts.push(trp('status.error', counts.error));
 
       const totalSize = state.rows.reduce((sum, row) => {
         const b = row.exportedBytes ?? row.estimateBytes;
@@ -4438,11 +4525,13 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
         row.baselineBytes != null ? sum + row.baselineBytes : sum, 0);
 
       if (totalSize > 0) parts.push(formatBytes(totalSize));
-      if (totalBaseline > totalSize && totalSize > 0) parts.push(`${formatBytes(totalBaseline - totalSize)} saved`);
+      if (totalBaseline > totalSize && totalSize > 0) {
+        parts.push(tr('status.saved', { size: formatBytes(totalBaseline - totalSize) }));
+      }
     } else {
       const outputCount = getExportOutputCount();
-      parts.push(`${outputCount} export${outputCount === 1 ? '' : 's'}`);
-      if (state.isEstimating) parts.push('estimating');
+      parts.push(trp('status.export', outputCount));
+      if (state.isEstimating) parts.push(tr('status.estimating'));
     }
 
     const footerSummary = createNode('span', 'footer-meta-text', parts.join(' • '));
@@ -4460,9 +4549,9 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     dom.settingsToggleButton.classList.toggle('is-active', isSettingsView);
     dom.settingsToggleButton.setAttribute(
       'aria-label',
-      isSettingsView ? 'Back to export queue' : 'Open settings',
+      isSettingsView ? tr('settings.back') : tr('settings.open'),
     );
-    dom.settingsToggleButton.title = isSettingsView ? 'Back to export queue' : 'Open settings';
+    dom.settingsToggleButton.title = isSettingsView ? tr('settings.back') : tr('settings.open');
   }
 
   function lockExportButtonWidth() {
@@ -4471,7 +4560,9 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     // Only the idle label and the spinner labels are shown on the button, so the
     // lock keeps the button at its idle size (no growth when export starts).
     const labels = [
-      hasRows && outputCount > 1 ? `Export ${outputCount}` : 'Export',
+      hasRows && outputCount > 1
+        ? tr('button.exportCount', { count: outputCount })
+        : tr('button.export'),
       ...EXPORT_BUTTON_BUSY_FRAMES.map((frame) => formatExportButtonBusyLabel(frame, 100)),
     ];
     const measuredWidth = labels.reduce(
@@ -4537,10 +4628,10 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
 
     if (hasRows) {
       const outputCount = getExportOutputCount();
-      return outputCount > 1 ? `Export ${outputCount}` : 'Export';
+      return outputCount > 1 ? tr('button.exportCount', { count: outputCount }) : tr('button.export');
     }
 
-    return 'Export';
+    return tr('button.export');
   }
 
   function updateExportButtonLabel() {
@@ -4581,6 +4672,8 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
   function render() {
     const hasRows = state.rows.length > 0;
     const isSettingsView = state.view === 'settings';
+    syncActiveLocale();
+    applyStaticTranslations();
     document.body.classList.toggle('is-settings-view', isSettingsView);
     document.body.classList.toggle('is-queue-view', !isSettingsView);
 
@@ -4599,6 +4692,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
 
     renderDefaultsControls();
     renderExportSettingsControls();
+    renderLanguageControls();
     renderSettingsDataControls();
     renderOpenSourceControls();
     renderSettingsNavTabs();
@@ -4640,7 +4734,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
         }
 
         const result = isStaleSession
-          ? { ok: false, detail: 'Stale export session.' }
+          ? { ok: false, detail: tr('error.staleSession') }
           : await queueDownload(message);
         sendExportFileAck(message, result);
       } catch (error) {
@@ -4732,7 +4826,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       type: 'cancel-export',
       sessionId: state.exportProgress.sessionId || '',
     });
-    updateFooterStatus('Stopping export…');
+    updateFooterStatus(tr('status.stopping'));
     render();
   }
 
@@ -4754,8 +4848,8 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       state.isCancelling = false;
       updateFooterStatus(
         isAbortError(error)
-          ? 'Export cancelled.'
-          : `Export setup failed. ${toErrorMessage(error)}`,
+          ? tr('status.exportCancelled')
+          : tr('status.exportSetupFailed', { error: toErrorMessage(error) }),
       );
       return;
     }
@@ -4790,7 +4884,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       const parsed = JSON.parse(text);
       applyImportedSettings(parsed, file.name);
     } catch (error) {
-      updateFooterStatus(`Import failed. ${toErrorMessage(error)}`);
+      updateFooterStatus(tr('status.importFailed', { error: toErrorMessage(error) }));
       renderFooter();
     }
   }
