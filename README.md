@@ -42,7 +42,3 @@ only, with attribution to 23di and a link back to this repository.
 
 Commercial use is not permitted without written permission. See [LICENSE](LICENSE)
 for the full license text.
-
-Suggested attribution:
-
-`TinyPic Image Compressor by 23di — https://github.com/23di/TinyPic`
