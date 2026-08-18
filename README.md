@@ -14,16 +14,6 @@ Figma plugin for compressing and exporting selected frames as PNG, JPG, WebP, SV
 - Reusable export profiles
 - Export as ZIP or to a local directory
 
-## Project Structure
-
-```
-src/code.js       — Plugin sandbox (Figma API, frame export, compression)
-src/main.js       — UI logic (settings, profiles, export controls)
-index.html        — UI entry point
-manifest.json     — Figma plugin manifest
-publish/          — Community listing metadata
-```
-
 ## Tech Stack
 
 - [libimagequant-wasm](https://github.com/nicolo-ribaudo/libimagequant-wasm) — PNG color quantization
