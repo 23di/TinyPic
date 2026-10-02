@@ -1,3 +1,4 @@
+import { normalizeSizing, resolveSizingScale, positiveNumber, normalizeQuickPresets, SIZING_MODES, isValidQuickPreset } from './export-sizing.js';
 import LibImageQuant from '@fe-daily/libimagequant-wasm';
 import * as wasmModuleNamespace from '@fe-daily/libimagequant-wasm/wasm/libimagequant_wasm.js';
 import initOxipng, { optimise as optimisePngSync } from '@jsquash/oxipng/codec/pkg/squoosh_oxipng.js';
@@ -463,6 +464,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
   const SETTINGS_GENERAL_TABS = [
     { value: 'defaults', labelKey: 'tab.defaults' },
     { value: 'export', labelKey: 'tab.export' },
+    { value: 'quick-presets', labelKey: 'tab.presets' },
     { value: 'language', labelKey: 'tab.language' },
     { value: 'data', labelKey: 'tab.data' },
     { value: 'libraries', labelKey: 'tab.libraries' },
@@ -497,6 +499,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
   let exportButtonAnimationTimer = null;
   let exportButtonAnimationIndex = 0;
   let exportButtonLockedWidth = 0;
+  let exportButtonCompact = false;
   let activeWarningTooltipTarget = null;
   let rasterExportWorker = null;
   let rasterExportRequestSeed = 0;
@@ -510,7 +513,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify({
         format: profile.format,
         preset: profile.preset,
-        scale: profile.scale,
+        ...normalizeSizing(profile),
       }));
     } catch { /* ignore */ }
   }
@@ -534,6 +537,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       scale: DEFAULT_DEFAULTS.scale,
     },
     settings: { ...DEFAULT_SETTINGS },
+    quickPresets: normalizeQuickPresets(),
     presetSettings: createDefaultPresetSettings(),
     profiles: [createDefaultProfile(storedProfile ? { ...DEFAULT_DEFAULTS, ...storedProfile } : undefined)],
     frames: [],
@@ -563,9 +567,12 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     settingsCloseButton: document.getElementById('settingsCloseButton'),
     profileStack: document.getElementById('profileStack'),
     exportButton: document.getElementById('exportButton'),
+    topbarHead: document.querySelector('.topbar-head'),
+    topbarMain: document.querySelector('.topbar-main'),
     settingsPanel: document.getElementById('settingsPanel'),
     exportPanel: document.getElementById('exportPanel'),
     settingsNavTabs: document.getElementById('settingsNavTabs'),
+    quickPresetsSection: document.getElementById('quickPresetsSection'),
     defaultsSection: document.getElementById('defaultsSection'),
     exportSettingsSection: document.getElementById('exportSettingsSection'),
     languageSection: document.getElementById('languageSection'),
@@ -879,10 +886,10 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
 
   function getSettingsNavItems() {
     const leadingTabs = SETTINGS_GENERAL_TABS.filter((tab) => (
-      tab.value === 'defaults' || tab.value === 'export'
+      tab.value === 'defaults' || tab.value === 'export' || tab.value === 'quick-presets'
     ));
     const trailingTabs = SETTINGS_GENERAL_TABS.filter((tab) => (
-      tab.value !== 'defaults' && tab.value !== 'export'
+      tab.value !== 'defaults' && tab.value !== 'export' && tab.value !== 'quick-presets'
     ));
     return [
       ...leadingTabs,
@@ -903,21 +910,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
   }
 
   function normalizeScale(value) {
-    const parsed = Number(value);
-    if (!Number.isFinite(parsed)) {
-      return DEFAULT_DEFAULTS.scale;
-    }
-
-    let closest = SCALE_OPTIONS[0];
-    let minDistance = Math.abs(parsed - closest);
-    SCALE_OPTIONS.forEach((option) => {
-      const distance = Math.abs(parsed - option);
-      if (distance < minDistance) {
-        closest = option;
-        minDistance = distance;
-      }
-    });
-    return closest;
+    return positiveNumber(value, 1, 0.01, 16);
   }
 
   function normalizeExportConcurrency(value) {
@@ -1217,6 +1210,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
         preserveFolderStructure: safeSettings.preserveFolderStructure !== false,
       },
       presetSettings: normalizePresetSettings(safeState.presetSettings),
+      quickPresets: normalizeQuickPresets(safeState.quickPresets),
       profiles: normalizeProfiles(safeState.profiles, {
         format: safeFormat,
         preset: safePresets[safeFormat],
@@ -1246,7 +1240,8 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       id: nextProfileId(),
       format,
       preset: getDefaultPresetForFormat(safeDefaults, format),
-      scale: normalizeScaleForFormat(format, safeDefaults.scale),
+      ...normalizeSizing(safeDefaults),
+      scale: normalizeScale(safeDefaults.scale),
     };
   }
 
@@ -1258,16 +1253,14 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     const safeProfile = rawProfiles[0] && typeof rawProfiles[0] === 'object' ? rawProfiles[0] : {};
     const format = normalizeFormat(safeProfile.format);
     return [{
+      ...normalizeSizing(safeProfile),
       id: typeof safeProfile.id === 'string' && safeProfile.id ? safeProfile.id : nextProfileId(),
       format,
       preset: normalizePreset(
         format,
         safeProfile.preset !== undefined ? safeProfile.preset : getDefaultPresetForFormat(fallbackDefaults, format),
       ),
-      scale: normalizeScaleForFormat(
-        format,
-        safeProfile.scale !== undefined ? safeProfile.scale : fallbackDefaults.scale,
-      ),
+      scale: normalizeScale(safeProfile.scale !== undefined ? safeProfile.scale : fallbackDefaults.scale),
     }];
   }
 
@@ -1703,6 +1696,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
         presets: { ...state.defaults.presets },
       },
       settings: { ...state.settings },
+      quickPresets: state.quickPresets,
       presetSettings: state.presetSettings,
       profiles: state.profiles.map((profile) => ({ ...profile })),
     };
@@ -1756,7 +1750,8 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
           height: Number(frame.height) || 0,
           format,
           preset,
-          scale,
+          ...normalizeSizing(profile),
+          scale: isVectorFormat(format) ? 1 : resolveSizingScale({ ...profile, scale }, frame.width, frame.height),
         };
         const shouldPreserveRuntime = Boolean(existingRow) && settings.preserveRuntime && state.isExporting;
 
@@ -1784,7 +1779,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       nodeId: row.nodeId,
       format: row.format,
       preset: row.preset,
-      scale: row.scale,
+      ...normalizeSizing(row),
     }));
   }
 
@@ -1834,6 +1829,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
         ...state.defaults,
         presets: { ...state.defaults.presets },
       },
+      quickPresets: state.quickPresets,
       presetSettings: state.presetSettings,
       rows: buildRequestRows(),
     });
@@ -1941,8 +1937,12 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
           ...profile,
           format: nextFormat,
           preset: getDefaultPresetForFormat(state.defaults, nextFormat),
-          scale: normalizeScaleForFormat(nextFormat, profile.scale, state.defaults.scale),
+          scale: normalizeScale(profile.scale),
         };
+      }
+
+      if (key === 'sizing') {
+        return { ...profile, ...normalizeSizing(value) };
       }
 
       if (key === 'preset') {
@@ -2036,6 +2036,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     saveLocalePreference(state.settings.locale);
     syncActiveLocale();
     state.presetSettings = nextState.presetSettings;
+    state.quickPresets = nextState.quickPresets;
     state.profiles = nextState.profiles;
     state.settingsTab = normalizeSettingsTab(state.settingsTab);
     state.settingsFormat = isPresetSettingsTab(state.settingsTab)
@@ -2068,6 +2069,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     applyImportedSettings({
       defaults: { ...DEFAULT_DEFAULTS },
       settings: { ...DEFAULT_SETTINGS },
+      quickPresets: normalizeQuickPresets(),
       presetSettings: createDefaultPresetSettings(),
       profiles: [createDefaultProfile()],
     });
@@ -2544,6 +2546,48 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
   }
 
   async function prepareDownloadPayload(message) {
+    const sizing = normalizeSizing(message);
+    if (sizing.exportMode !== 'size' || isVectorFormat(message.format)) {
+      return prepareRasterPayload(message);
+    }
+    const limit = sizing.maxKB * 1024;
+    const initial = await prepareRasterPayload({ ...message, skipProcessing: false });
+    if (initial.bytes.byteLength <= limit) return initial;
+
+    // Always resample the original source, avoiding repeated lossy decoding.
+    const source = await loadRasterSource(toUint8Array(message.bytes), message.sourceMimeType || 'image/png');
+    try {
+      let width = source.width;
+      let height = source.height;
+      let result = initial;
+      for (let attempt = 0; attempt < 24; attempt += 1) {
+        if (width === 1 && height === 1) break;
+        const ratio = Math.min(0.85, Math.sqrt(limit / result.bytes.byteLength) * 0.9);
+        width = Math.max(1, Math.floor(width * ratio));
+        height = Math.max(1, Math.floor(height * ratio));
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) throw new Error(tr('error.canvasContext'));
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(source.image, 0, 0, width, height);
+        const blob = await canvasToBlob(canvas, 'image/png');
+        result = await prepareRasterPayload({
+          ...message,
+          skipProcessing: false,
+          sourceMimeType: 'image/png',
+          bytes: new Uint8Array(await blob.arrayBuffer()),
+        });
+        if (result.bytes.byteLength <= limit) return result;
+      }
+      throw new Error(tr('sizing.unreachable', { value: sizing.maxKB }));
+    } finally {
+      source.dispose();
+    }
+  }
+
+  async function prepareRasterPayload(message) {
     const sourceBytes = toUint8Array(message.bytes);
     if (!sourceBytes.byteLength) {
       throw new Error(tr('error.emptyPayload'));
@@ -3226,19 +3270,14 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
   function createSelectSettingCard(label, options, value, onChange, disabled) {
     const card = createNode('div', 'setting-card');
     const labelNode = createNode('span', 'setting-card-label', label);
-    const select = document.createElement('select');
-    options.forEach((option) => {
-      const node = document.createElement('option');
-      node.value = option.value;
-      node.textContent = option.label;
-      select.appendChild(node);
+    const choice = createChoiceControl(value, options, label, disabled, (nextValue) => {
+      onChange(nextValue);
+      Array.from(dom.settingsPanel.querySelectorAll('summary')).find((node) => (
+        node.getAttribute('aria-label') === label
+      ))?.focus();
     });
-    select.value = value;
-    select.disabled = disabled;
-    select.addEventListener('change', () => {
-      onChange(select.value);
-    });
-    card.append(labelNode, select);
+    choice.classList.add('settings-choice');
+    card.append(labelNode, choice);
     return card;
   }
 
@@ -3350,19 +3389,14 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
   function createPresetSelectControl(label, options, value, onChange, disabled) {
     const control = createNode('div', 'preset-control');
     const labelNode = createNode('span', 'preset-control-label', label);
-    const select = document.createElement('select');
-    options.forEach((option) => {
-      const node = document.createElement('option');
-      node.value = option.value;
-      node.textContent = option.label;
-      select.appendChild(node);
+    const choice = createChoiceControl(value, options, label, disabled, (nextValue) => {
+      onChange(nextValue);
+      Array.from(dom.settingsPanel.querySelectorAll('summary')).find((node) => (
+        node.getAttribute('aria-label') === label
+      ))?.focus();
     });
-    select.value = value;
-    select.disabled = disabled;
-    select.addEventListener('change', () => {
-      onChange(select.value);
-    });
-    control.append(labelNode, select);
+    choice.classList.add('settings-choice');
+    control.append(labelNode, choice);
     return control;
   }
 
@@ -3537,6 +3571,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     const activeTab = normalizeSettingsTab(state.settingsTab);
     state.settingsTab = activeTab;
 
+    dom.quickPresetsSection.hidden = activeTab !== 'quick-presets';
     dom.defaultsSection.hidden = activeTab !== 'defaults';
     dom.exportSettingsSection.hidden = activeTab !== 'export';
     dom.languageSection.hidden = activeTab !== 'language';
@@ -3789,6 +3824,83 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     return card;
   }
 
+  function renderQuickPresetSettings() {
+    dom.quickPresetsSection.replaceChildren();
+    SIZING_MODES.forEach((mode) => {
+      const card = createNode('article', 'setting-card quick-presets-card');
+      card.dataset.mode = mode;
+      card.appendChild(createNode('h3', 'preset-card-title', tr(`sizing.${mode}`)));
+      const values = state.quickPresets[mode];
+      const suffix = mode === 'scale' ? 'x' : mode === 'size' ? 'kb' : 'px';
+      values.forEach((value, index) => {
+        const row = createNode('div', 'quick-preset-row');
+        const field = createNode('label', 'sizing-value-field');
+        const wrap = createNode('span', 'sizing-input-wrap');
+        const measure = createNode('span', 'sizing-value-measure', String(value));
+        measure.setAttribute('aria-hidden', 'true');
+        const input = document.createElement('input');
+        input.className = 'sizing-value-input';
+        input.type = 'text';
+        input.inputMode = mode === 'scale' ? 'decimal' : 'numeric';
+        input.value = value;
+        input.disabled = state.isExporting;
+        input.setAttribute('aria-label', tr('sizing.presetValue', { mode: tr(`sizing.${mode}`), index: index + 1 }));
+        const unit = createNode('span', 'sizing-unit', suffix);
+        unit.setAttribute('aria-hidden', 'true');
+        function validate() {
+          const raw = input.value.trim().replace(',', '.');
+          const next = Number(raw);
+          const valid = /^(?:\d+(?:\.\d*)?|\.\d+)$/.test(raw) && isValidQuickPreset(mode, next);
+          const duplicate = values.some((existing, position) => position !== index && existing === next);
+          input.setCustomValidity(!valid
+            ? tr('sizing.invalidValue', { min: mode === 'scale' ? 0.01 : 1, max: mode === 'scale' ? 16 : mode === 'size' ? 102400 : 32768 })
+            : duplicate ? tr('sizing.duplicatePreset') : '');
+          measure.textContent = input.value || '0';
+          return valid && !duplicate;
+        }
+        input.addEventListener('input', validate);
+        input.addEventListener('change', () => {
+          if (!validate()) { input.reportValidity(); return; }
+          values[index] = Number(input.value.trim().replace(',', '.'));
+          persistStateSoon();
+        });
+        input.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter') { event.preventDefault(); input.blur(); }
+        });
+        wrap.append(measure, input);
+        field.append(wrap, unit);
+        const remove = createNode('button', 'ghost-btn quick-preset-remove', '×');
+        remove.type = 'button';
+        remove.disabled = state.isExporting;
+        remove.setAttribute('aria-label', tr('sizing.removePreset', { value: `${value}${suffix}` }));
+        remove.addEventListener('click', () => {
+          values.splice(index, 1);
+          persistStateSoon();
+          renderQuickPresetSettings();
+          const nextCard = dom.quickPresetsSection.querySelector(`[data-mode="${mode}"]`);
+          (nextCard.querySelectorAll('input')[Math.min(index, values.length - 1)] || nextCard.querySelector('.quick-preset-add')).focus();
+        });
+        row.append(field, remove);
+        card.appendChild(row);
+      });
+      const add = createNode('button', 'token-add-btn quick-preset-add', tr('sizing.addPreset'));
+      add.type = 'button';
+      add.disabled = state.isExporting || values.length >= 5;
+      add.addEventListener('click', () => {
+        let value = mode === 'scale' ? 1 : mode === 'size' ? 200 : mode === 'width' ? 1920 : 1080;
+        while (values.includes(value)) value += mode === 'scale' ? 0.5 : 1;
+        values.push(value);
+        persistStateSoon();
+        renderQuickPresetSettings();
+        const inputs = dom.quickPresetsSection.querySelectorAll(`[data-mode="${mode}"] input`);
+        inputs[inputs.length - 1].focus();
+        inputs[inputs.length - 1].select();
+      });
+      card.appendChild(add);
+      dom.quickPresetsSection.appendChild(card);
+    });
+  }
+
   function renderPresetSettingsControls() {
     const format = getActivePresetSettingsFormat();
     state.settingsFormat = format;
@@ -3808,6 +3920,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     state.settings = nextState.settings;
     syncActiveLocale();
     state.presetSettings = nextState.presetSettings;
+    state.quickPresets = nextState.quickPresets;
     state.profiles = nextState.profiles;
     if (state.profiles[0]) saveProfileToStorage(state.profiles[0]);
     state.settingsTab = normalizeSettingsTab(state.settingsTab);
@@ -4319,7 +4432,284 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     });
   }
 
+  function sizingLabel(value) {
+    const sizing = normalizeSizing(value);
+    if (sizing.exportMode === 'size') return `≤ ${sizing.maxKB} KB`;
+    if (sizing.exportMode === 'width') return `W ≤ ${sizing.maxWidth}`;
+    if (sizing.exportMode === 'height') return `H ≤ ${sizing.maxHeight}`;
+    return formatScale(sizing.scale);
+  }
+
+  function createSizingControl(profile) {
+    const details = createNode('details', 'sizing-control');
+    const summary = createNode('summary', 'sizing-summary', sizingLabel(profile));
+    summary.setAttribute('aria-label', tr('sizing.title'));
+    summary.setAttribute('aria-disabled', String(state.isExporting));
+    summary.addEventListener('click', (event) => {
+      if (state.isExporting) {
+        event.preventDefault();
+        return;
+      }
+      if (!details.open) positionPanel();
+    });
+    const panel = createNode('form', 'sizing-panel');
+    const draft = normalizeSizing(profile);
+    const modes = createNode('div', 'sizing-modes');
+    modes.setAttribute('role', 'radiogroup');
+    modes.setAttribute('aria-label', tr('sizing.mode'));
+    const modeInputs = [];
+    ['scale', 'size', 'width', 'height'].forEach((mode) => {
+      const label = createNode('label', 'sizing-mode');
+      const radio = document.createElement('input');
+      radio.type = 'radio';
+      radio.name = `sizing-mode-${profile.id}`;
+      radio.value = mode;
+      radio.setAttribute('aria-label', tr(`sizing.${mode}`));
+      radio.checked = mode === draft.exportMode;
+      radio.disabled = state.isExporting;
+      radio.addEventListener('change', () => {
+        draft.exportMode = mode;
+        syncInput();
+      });
+      modeInputs.push(radio);
+      const modeLabel = createNode('span', 'sizing-mode-label');
+      modeLabel.appendChild(createNode('span', 'sizing-mode-caption', tr(`sizing.tab.${mode}`)));
+      label.append(radio, modeLabel);
+      modes.appendChild(label);
+    });
+    const presetSection = createNode('div', 'sizing-preset-section');
+    const presets = createNode('div', 'sizing-presets');
+    presets.setAttribute('role', 'group');
+    presets.setAttribute('aria-label', tr('sizing.presets'));
+    presetSection.append(presets);
+    const quickPresets = state.quickPresets;
+    let presetButtons = [];
+    let presetMode = null;
+    function renderPresets() {
+      const mode = draft.exportMode;
+      if (presetMode === mode) return;
+      presetMode = mode;
+      const suffix = mode === 'scale' ? 'x' : mode === 'size' ? 'kb' : 'px';
+      presetButtons = quickPresets[mode].map((value) => {
+        const button = createNode('button', 'token-add-btn sizing-preset');
+        button.type = 'button';
+        button.disabled = state.isExporting;
+        button.setAttribute('aria-label', `${value}${suffix}`);
+        button.append(createNode('span', 'sizing-preset-number', String(value)), createNode('span', 'sizing-preset-unit', suffix));
+        button.addEventListener('click', () => {
+          draft[keyForMode[mode]] = value;
+          syncInput();
+          input.focus();
+          input.select();
+        });
+        return { button, value };
+      });
+      presets.replaceChildren(...presetButtons.map(({ button }) => button));
+    }
+    const valueField = createNode('label', 'sizing-value-field');
+    const inputWrap = createNode('span', 'sizing-input-wrap');
+    const measure = createNode('span', 'sizing-value-measure');
+    measure.setAttribute('aria-hidden', 'true');
+    const input = document.createElement('input');
+    input.className = 'sizing-value-input';
+    input.type = 'text';
+    input.required = true;
+    input.autocomplete = 'off';
+    input.disabled = state.isExporting;
+    const unit = createNode('span', 'sizing-unit');
+    unit.setAttribute('aria-hidden', 'true');
+    const keyForMode = { scale: 'scale', size: 'maxKB', width: 'maxWidth', height: 'maxHeight' };
+    function validateInput() {
+      const mode = draft.exportMode;
+      const raw = input.value.trim().replace(',', '.');
+      const value = Number(raw);
+      const min = mode === 'scale' ? 0.01 : 1;
+      const max = mode === 'scale' ? 16 : mode === 'size' ? 102400 : 32768;
+      const valid = /^(?:\d+(?:\.\d*)?|\.\d+)$/.test(raw)
+        && Number.isFinite(value) && value >= min && value <= max
+        && (mode === 'scale' || Number.isInteger(value));
+      input.setCustomValidity(valid ? '' : tr('sizing.invalidValue', { min, max }));
+      if (valid) draft[keyForMode[mode]] = value;
+      measure.textContent = input.value || '0';
+      presetButtons.forEach(({ button, value: presetValue }) => {
+        button.setAttribute('aria-pressed', String(valid && presetValue === value));
+      });
+      return valid;
+    }
+    function syncInput() {
+      const mode = draft.exportMode;
+      input.setAttribute('aria-label', tr(`sizing.${mode}`));
+      input.inputMode = mode === 'scale' ? 'decimal' : 'numeric';
+      input.value = draft[keyForMode[mode]];
+      unit.textContent = mode === 'scale' ? 'x' : mode === 'size' ? 'kb' : 'px';
+      renderPresets();
+      modeInputs.forEach((radio) => { radio.checked = radio.value === mode; });
+      validateInput();
+    }
+    input.addEventListener('input', validateInput);
+    inputWrap.append(measure, input);
+    valueField.append(inputWrap, unit);
+    const apply = createNode('button', 'primary-btn sizing-apply', tr('sizing.apply'));
+    apply.type = 'submit';
+    apply.disabled = state.isExporting;
+    panel.addEventListener('submit', (event) => {
+      event.preventDefault();
+      if (state.isExporting || !validateInput() || !panel.reportValidity()) return;
+      details.open = false;
+      updateProfileValue(profile.id, 'sizing', draft);
+      dom.profileStack.querySelector('.sizing-control:not(.profile-choice) > summary')?.focus();
+    });
+    const editor = createNode('div', 'sizing-editor');
+    editor.append(valueField, apply);
+    panel.append(modes, editor, presetSection);
+    details.append(summary, panel);
+    details.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        details.open = false;
+        summary.focus();
+      }
+    });
+    function positionPanel() {
+      const rect = summary.getBoundingClientRect();
+      const panelWidth = Math.min(328, window.innerWidth - 32);
+      const left = Math.max(16, Math.min(window.innerWidth - panelWidth - 16,
+        rect.left + rect.width / 2 - panelWidth / 2));
+      panel.style.left = `${left}px`;
+      const top = rect.bottom + 8;
+      panel.style.top = `${top}px`;
+      panel.style.maxHeight = `${Math.max(0, window.innerHeight - top - 16)}px`;
+    }
+    details.addEventListener('toggle', () => { if (details.open) positionPanel(); });
+    details.addEventListener('reposition-sizing', positionPanel);
+    syncInput();
+    return details;
+  }
+
+  document.addEventListener('toggle', (event) => {
+    if (!event.target.matches?.('.sizing-control[open]')) return;
+    document.querySelectorAll('.sizing-control[open]').forEach((details) => {
+      if (details !== event.target) details.open = false;
+    });
+  }, true);
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Tab') document.documentElement.classList.add('is-keyboard-navigation');
+  });
+  document.addEventListener('pointerdown', () => {
+    document.documentElement.classList.remove('is-keyboard-navigation');
+  });
+  window.addEventListener('resize', () => {
+    document.querySelectorAll('.sizing-control[open]').forEach((details) => {
+      details.dispatchEvent(new Event('reposition-sizing'));
+    });
+  });
+
+  document.addEventListener('click', (event) => {
+    document.querySelectorAll('.sizing-control[open]').forEach((details) => {
+      if (!details.contains(event.target)) details.open = false;
+    });
+  });
+
+  function createChoiceControl(value, options, label, disabled, onChange) {
+    const details = createNode('details', 'sizing-control profile-choice');
+    const selected = options.find((option) => option.value === value);
+    const summary = createNode('summary', 'sizing-summary');
+    summary.appendChild(createNode('span', 'choice-selected-label', selected?.label || ''));
+    summary.title = selected?.label || '';
+    summary.setAttribute('aria-label', label);
+    summary.setAttribute('aria-haspopup', 'menu');
+    summary.setAttribute('aria-expanded', 'false');
+    summary.setAttribute('aria-disabled', String(disabled));
+    const menu = createNode('div', 'sizing-panel profile-choice-menu');
+    const useTopLayer = typeof menu.showPopover === 'function';
+    if (useTopLayer) menu.setAttribute('popover', 'manual');
+    menu.setAttribute('role', 'menu');
+    menu.setAttribute('aria-label', label);
+    const buttons = options.map((option) => {
+      const button = createNode('button', 'profile-choice-option');
+      button.type = 'button';
+      button.disabled = disabled;
+      button.setAttribute('role', 'menuitemradio');
+      button.setAttribute('aria-checked', String(option.value === value));
+      const check = createNode('span', 'profile-choice-check', '✓');
+      check.setAttribute('aria-hidden', 'true');
+      button.append(createNode('span', '', option.label), check);
+      button.addEventListener('click', () => {
+        details.open = false;
+        onChange(option.value);
+        if (details.isConnected) summary.focus();
+      });
+      menu.appendChild(button);
+      return button;
+    });
+    function positionMenu() {
+      const rect = summary.getBoundingClientRect();
+      const width = Math.min(Math.max(180, rect.width), window.innerWidth - 32);
+      menu.style.width = `${width}px`;
+      const top = rect.bottom + 8;
+      menu.style.left = `${Math.max(16, Math.min(rect.left, window.innerWidth - width - 16))}px`;
+      menu.style.top = `${top}px`;
+      menu.style.maxHeight = `${Math.max(0, window.innerHeight - top - 16)}px`;
+    }
+    summary.addEventListener('click', (event) => {
+      event.preventDefault();
+      if (disabled) return;
+      details.open = !details.open;
+      if (details.open) {
+        positionMenu();
+        if (useTopLayer && !menu.matches(':popover-open')) menu.showPopover();
+      } else if (useTopLayer && menu.matches(':popover-open')) {
+        menu.hidePopover();
+      }
+    });
+    details.addEventListener('toggle', () => {
+      summary.setAttribute('aria-expanded', String(details.open));
+      if (details.open) {
+        if (useTopLayer && !menu.matches(':popover-open')) menu.showPopover();
+        positionMenu();
+      } else if (useTopLayer && menu.matches(':popover-open')) {
+        menu.hidePopover();
+      }
+    });
+    details.addEventListener('reposition-sizing', positionMenu);
+    details.addEventListener('keydown', (event) => {
+      if (disabled) return;
+      const index = buttons.indexOf(document.activeElement);
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        details.open = false;
+        summary.focus();
+      } else if (event.key === 'Tab') {
+        details.open = false;
+      } else if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+        event.preventDefault();
+        positionMenu();
+        details.open = true;
+        if (useTopLayer && !menu.matches(':popover-open')) menu.showPopover();
+        const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1
+          : index < 0 ? Math.max(0, options.findIndex((option) => option.value === value))
+          : (index + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length;
+        buttons[next]?.focus();
+      }
+    });
+    details.append(summary, menu);
+    return details;
+  }
+
+  function createProfileChoice(profile, key, options, label) {
+    const choice = createChoiceControl(profile[key], options, label, state.isExporting, (value) => {
+      updateProfileValue(profile.id, key, value);
+      dom.profileStack.querySelector(`[data-choice="${key}"] > summary`)?.focus();
+    });
+    choice.dataset.choice = key;
+    return choice;
+  }
+
   function renderProfileStack() {
+    // Background estimates must not replace an open editor or its input draft.
+    const signature = JSON.stringify([state.profiles, activeLocale, state.isExporting]);
+    if (dom.profileStack.dataset.signature === signature) return;
+    dom.profileStack.dataset.signature = signature;
     dom.profileStack.replaceChildren();
 
     const profile = state.profiles[0];
@@ -4330,67 +4720,20 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     const row = createNode('div', 'profile-row');
     const fields = createNode('div', 'profile-row-fields');
 
-    const formatField = createNode('label', 'profile-field');
-    const formatSelect = document.createElement('select');
-    formatSelect.setAttribute('aria-label', tr('settings.defaultFormat'));
-    FORMAT_OPTIONS.forEach((option) => {
-      const node = document.createElement('option');
-      node.value = option.value;
-      node.textContent = getFormatLabel(option.value);
-      formatSelect.appendChild(node);
-    });
-    formatSelect.value = profile.format;
-    formatSelect.disabled = state.isExporting;
-    formatSelect.addEventListener('change', () => {
-      updateProfileValue(profile.id, 'format', formatSelect.value);
-    });
-    formatField.appendChild(formatSelect);
+    fields.append(
+      createProfileChoice(profile, 'format', FORMAT_OPTIONS.map((option) => ({
+        value: option.value, label: getFormatLabel(option.value),
+      })), tr('settings.defaultFormat')),
+      createProfileChoice(profile, 'preset', getPresetDefinitions(profile.format).map((definition) => ({
+        value: definition.value, label: getPresetLabel(profile.format, definition),
+      })), tr('settings.formatPreset', { format: getFormatLabel(profile.format) })),
+    );
 
-    const presetField = createNode('label', 'profile-field');
-    const presetSelect = document.createElement('select');
-    presetSelect.setAttribute('aria-label', tr('settings.formatPreset', { format: getFormatLabel(profile.format) }));
-    getPresetDefinitions(profile.format).forEach((definition) => {
-      const node = document.createElement('option');
-      node.value = definition.value;
-      node.textContent = getPresetLabel(profile.format, definition);
-      presetSelect.appendChild(node);
-    });
-    presetSelect.value = profile.preset;
-    presetSelect.disabled = state.isExporting;
-    presetSelect.addEventListener('change', () => {
-      updateProfileValue(profile.id, 'preset', presetSelect.value);
-    });
-    presetField.appendChild(presetSelect);
-
-    fields.append(formatField, presetField);
-
-    let scaleSelect = null;
-    if (profile.format !== 'PDF') {
-      const scaleField = createNode('label', 'profile-field');
-      scaleSelect = document.createElement('select');
-      scaleSelect.setAttribute('aria-label', tr('template.var.scale'));
-      SCALE_OPTIONS.forEach((value) => {
-        const node = document.createElement('option');
-        node.value = String(value);
-        node.textContent = formatScale(value);
-        scaleSelect.appendChild(node);
-      });
-      scaleSelect.value = String(profile.scale);
-      scaleSelect.disabled = state.isExporting || isVectorFormat(profile.format);
-      scaleSelect.addEventListener('change', () => {
-        updateProfileValue(profile.id, 'scale', scaleSelect.value);
-      });
-      scaleField.appendChild(scaleSelect);
-      fields.appendChild(scaleField);
+    if (!isVectorFormat(profile.format)) {
+      fields.appendChild(createSizingControl(profile));
     }
     row.appendChild(fields);
     dom.profileStack.appendChild(row);
-
-    fitSelectToContent(formatSelect);
-    fitSelectToContent(presetSelect);
-    if (scaleSelect) {
-      fitSelectToContent(scaleSelect);
-    }
   }
 
   function renderRow(row) {
@@ -4433,14 +4776,41 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
           ? 'negative'
           : 'muted';
     const fileMeta = createNode('p', 'file-meta');
+    const sizeSegment = createNode('span', getMetricClass('metric-cell meta-segment', resultClass), resultLabel);
+    // Before export the size is an estimate, not the delivered byte count; hint at that on hover.
+    const showsEstimate = row.status !== 'error'
+      && typeof row.exportedBytes !== 'number'
+      && typeof row.estimateBytes === 'number';
+    if (showsEstimate) {
+      sizeSegment.classList.add('is-estimate');
+      sizeSegment.setAttribute('role', 'button');
+      sizeSegment.setAttribute('tabindex', '0');
+      sizeSegment.setAttribute('aria-label', tr('status.estimateHint'));
+      sizeSegment.dataset.tooltip = tr('status.estimateHint');
+      const toggleEstimateHint = (event) => {
+        event.stopPropagation();
+        if (activeWarningTooltipTarget === sizeSegment) {
+          hideWarningTooltip(sizeSegment);
+        } else {
+          showWarningTooltip(sizeSegment);
+        }
+      };
+      sizeSegment.addEventListener('click', toggleEstimateHint);
+      sizeSegment.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          toggleEstimateHint(event);
+        }
+      });
+    }
     const metaSegments = [
       createNode('span', 'meta-segment', formatDimensions(row.width, row.height)),
       createNode('span', 'meta-segment', row.format),
-      createNode('span', getMetricClass('metric-cell meta-segment', resultClass), resultLabel),
+      sizeSegment,
       createNode('span', getMetricClass('metric-cell meta-segment', compressionState), getCompressionLabel(row)),
     ];
     if (!isVectorFormat(row.format)) {
-      metaSegments.splice(2, 0, createNode('span', 'meta-segment', formatScale(row.scale)));
+      metaSegments.splice(2, 0, createNode('span', 'meta-segment', sizingLabel(row)));
     }
 
     metaSegments.forEach((segment, index) => {
@@ -4554,7 +4924,35 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     dom.settingsToggleButton.title = isSettingsView ? tr('settings.back') : tr('settings.open');
   }
 
+  function renderTopbarLayout() {
+    if (state.view === 'settings') return;
+    const fields = dom.profileStack.querySelector('.profile-row-fields');
+    if (!fields) return;
+    const controls = Array.from(fields.children);
+    const gap = parseFloat(getComputedStyle(fields).columnGap) || 0;
+    const mainGap = parseFloat(getComputedStyle(dom.topbarMain).columnGap) || 0;
+    const actionGap = parseFloat(getComputedStyle(dom.topbarHead).columnGap) || 0;
+    const controlsWidth = controls.reduce((sum, node) => sum + node.getBoundingClientRect().width, 0)
+      + gap * Math.max(0, controls.length - 1);
+    const mainWidth = controlsWidth + mainGap + dom.settingsToggleButton.getBoundingClientRect().width;
+    const outputCount = getExportOutputCount();
+    const idleLabel = outputCount > 1 ? tr('button.exportCount', { count: outputCount }) : tr('button.export');
+    const textWidth = state.isExporting && exportButtonLockedWidth > 36
+      ? exportButtonLockedWidth : Math.ceil(measureButtonLabelWidth(idleLabel));
+    const availableWidth = dom.topbarHead.getBoundingClientRect().width;
+    exportButtonCompact = mainWidth + actionGap + textWidth > availableWidth;
+    const stacked = exportButtonCompact && mainWidth + actionGap + 36 > availableWidth;
+    dom.exportButton.classList.toggle('is-export-icon', exportButtonCompact);
+    dom.topbarHead.classList.toggle('is-stacked-export', stacked);
+    updateExportButtonLabel();
+  }
+
   function lockExportButtonWidth() {
+    if (exportButtonCompact) {
+      exportButtonLockedWidth = 36;
+      dom.exportButton.style.width = '36px';
+      return;
+    }
     const hasRows = state.rows.length > 0;
     const outputCount = getExportOutputCount();
     // Only the idle label and the spinner labels are shown on the button, so the
@@ -4595,6 +4993,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
   function measureButtonLabelWidth(label) {
     const probe = document.createElement('button');
     probe.className = dom.exportButton.className;
+    probe.classList.remove('is-export-icon');
     probe.type = 'button';
     probe.disabled = dom.exportButton.disabled;
     probe.textContent = label;
@@ -4636,7 +5035,26 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
 
   function updateExportButtonLabel() {
     const hasRows = state.rows.length > 0;
-    dom.exportButton.textContent = getExportButtonLabel(hasRows);
+    const label = getExportButtonLabel(hasRows);
+    const accessibleLabel = state.isExporting
+      ? `${tr(state.isCancelling ? 'status.stopping' : 'button.stopExport')} ${clampExportProgressPercent(state.exportProgress.completed, state.exportProgress.total)}%`
+      : label;
+    dom.exportButton.setAttribute('aria-label', accessibleLabel);
+    dom.exportButton.title = accessibleLabel;
+    if (!exportButtonCompact) {
+      dom.exportButton.textContent = label;
+      return;
+    }
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('aria-hidden', 'true');
+    svg.setAttribute('stroke-width', '1.8');
+    svg.setAttribute('stroke-linecap', 'round');
+    svg.setAttribute('stroke-linejoin', 'round');
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', state.isExporting ? 'M6 6h12v12H6z' : 'M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5');
+    svg.appendChild(path);
+    dom.exportButton.replaceChildren(svg);
   }
 
   function stopExportButtonAnimation() {
@@ -4698,7 +5116,9 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     renderSettingsNavTabs();
     renderSettingsSectionVisibility();
     renderPresetSettingsControls();
+    renderQuickPresetSettings();
     renderProfileStack();
+    renderTopbarLayout();
     renderRows();
     renderFooter();
   }
@@ -4864,6 +5284,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
         presets: { ...state.defaults.presets },
       },
       settings: { ...state.settings },
+      quickPresets: state.quickPresets,
       presetSettings: state.presetSettings,
       profiles: state.profiles.map((profile) => ({ ...profile })),
       rows: buildRequestRows(),
@@ -4890,6 +5311,9 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
   }
 
   function wireEvents() {
+    const topbarObserver = new ResizeObserver(renderTopbarLayout);
+    topbarObserver.observe(dom.topbarHead);
+    topbarObserver.observe(dom.profileStack);
     dom.settingsToggleButton.addEventListener('click', () => {
       setView(state.view === 'settings' ? 'export' : 'settings');
     });
@@ -4903,6 +5327,16 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     dom.resizeGrip.addEventListener('pointercancel', handleResizeGripPointerUp);
     dom.resizeGrip.addEventListener('lostpointercapture', () => {
       stopUiResize();
+    });
+
+    document.addEventListener('click', (event) => {
+      if (
+        activeWarningTooltipTarget
+        && activeWarningTooltipTarget.classList.contains('is-estimate')
+        && !activeWarningTooltipTarget.contains(event.target)
+      ) {
+        hideWarningTooltip();
+      }
     });
 
     window.addEventListener('message', handleWindowMessage);

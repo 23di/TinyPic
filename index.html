@@ -15,6 +15,8 @@
       --line: var(--figma-color-border, #e6e6e6);
       --line-strong: var(--figma-color-border-strong, #0000004d);
       --line-hover: #B6BCC6;
+      --choice-hover: var(--figma-color-bg-hover, #eaeaea);
+      --choice-selected: var(--figma-color-bg-tertiary, #e2e2e2);
       --text: var(--figma-color-text, #000000e5);
       --muted: var(--figma-color-text-secondary, #00000080);
       --accent: var(--figma-color-bg-brand, #0d99ff);
@@ -43,6 +45,8 @@
 
     html.figma-dark {
       color-scheme: dark;
+      --choice-hover: var(--figma-color-bg-hover, #383838);
+      --choice-selected: var(--figma-color-bg-tertiary, #454545);
       --line-hover: #a3adbb;
       --select-arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23ffffff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E");
     }
@@ -136,10 +140,10 @@
       cursor: not-allowed;
     }
 
-    button:focus-visible,
-    select:focus-visible,
-    input:focus-visible,
-    textarea:focus-visible {
+    html.is-keyboard-navigation button:focus-visible,
+    html.is-keyboard-navigation select:focus-visible,
+    html.is-keyboard-navigation input:focus-visible,
+    html.is-keyboard-navigation textarea:focus-visible {
       outline: none;
       border-color: var(--accent);
       box-shadow: 0 0 0 3px var(--ring);
@@ -172,7 +176,7 @@
 
     .topbar-head {
       display: flex;
-      flex-wrap: nowrap;
+      flex-wrap: wrap;
       align-items: center;
       gap: 8px 12px;
     }
@@ -181,8 +185,8 @@
       display: flex;
       align-items: center;
       gap: 8px;
-      flex: 1 1 auto;
-      min-width: 0;
+      flex: 1 0 auto;
+      min-width: max-content;
     }
 
     .inline-note {
@@ -199,15 +203,26 @@
       flex-wrap: nowrap;
       justify-content: flex-end;
       flex: 0 0 auto;
-      /* Pin to the right; when the controls don't fit, the export wraps to its
-         own line and stays right-aligned (under the controls) instead of colliding. */
       margin-left: auto;
     }
 
+    .topbar-head.is-stacked-export .topbar-actions {
+      order: -1; flex-basis: 100%; margin-left: 0; justify-content: flex-start;
+    }
+    .topbar-head.is-stacked-export .topbar-main { flex-basis: 100%; min-width: 0; }
+    .topbar-head.is-stacked-export .profile-stack { min-width: 0; flex: 1 1 auto; }
+    .topbar-head.is-stacked-export .profile-row-fields { flex-wrap: wrap; }
+    .topbar-head.is-stacked-export .profile-row { min-width: 0; }
+    #exportButton.is-export-icon {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 36px !important; min-width: 36px; padding: 0;
+    }
+    #exportButton svg { width: 18px; height: 18px; stroke: currentColor; fill: none; }
+
     .profile-stack {
       display: flex;
-      min-width: 0;
-      flex: 0 1 auto;
+      min-width: max-content;
+      flex: 0 0 auto;
     }
 
     .profile-row {
@@ -256,10 +271,112 @@
       cursor: pointer;
     }
 
-    .profile-field select:focus,
-    .setting-card select:focus,
-    .preset-control select:focus,
-    .preset-control textarea:focus {
+    .sizing-control { position: relative; flex: 0 0 auto; }
+    .sizing-summary {
+      display: flex; align-items: center; height: 36px;
+      padding: 0 26px 0 12px; border: 1px solid var(--line);
+      border-radius: var(--radius-md); background: var(--panel-strong);
+      background-image: var(--select-arrow); background-repeat: no-repeat;
+      background-position: calc(100% - 10px) 50%; background-size: 10px 6px;
+      cursor: pointer; list-style: none; white-space: nowrap;
+      max-width: 112px; overflow: hidden; text-overflow: ellipsis;
+    }
+    .sizing-summary::-webkit-details-marker { display: none; }
+    .sizing-summary:hover { border-color: var(--line-hover); }
+    html.is-keyboard-navigation .sizing-summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .sizing-summary[aria-disabled="true"] { opacity: 0.5; cursor: not-allowed; }
+    .sizing-panel {
+      position: fixed; z-index: 20; top: 64px; left: 16px;
+      overflow-y: auto; overscroll-behavior: contain;
+      width: min(328px, calc(100vw - 32px)); padding: 12px;
+      display: grid; gap: 12px;
+      border: 1px solid var(--line); border-radius: var(--radius-lg);
+      background: var(--panel-strong); box-shadow: 0 6px 18px #0002;
+    }
+    .sizing-control:not([open]) .sizing-panel { display: none; }
+    .profile-choice > .sizing-summary { max-width: none; }
+    .choice-selected-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    .settings-choice { align-self: flex-start; max-width: 100%; }
+    .settings-choice > summary { max-width: 100%; }
+    .profile-choice-menu.sizing-panel {
+      width: min(180px, calc(100vw - 32px)); padding: 6px; gap: 2px;
+    }
+    .profile-choice-menu[popover] { margin: 0; right: auto; bottom: auto; }
+    .profile-choice-menu[popover]:not(:popover-open) { display: none; }
+    .profile-choice-option {
+      display: flex; align-items: center; justify-content: space-between;
+      width: 100%; min-height: 36px; padding: 8px 10px;
+      border: none; border-radius: var(--radius-sm);
+      background: transparent; color: var(--text); text-align: left;
+      font-size: 12px; line-height: 18px;
+    }
+    .profile-choice-option:hover:not(:disabled) { background: var(--choice-hover); }
+    .profile-choice-option[aria-checked="true"] { background: var(--choice-selected); }
+    .profile-choice-option[aria-checked="true"]:hover:not(:disabled) { background: var(--choice-selected); }
+    .profile-choice-option > span:first-child { min-width: 0; overflow-wrap: anywhere; }
+    .profile-choice-check { flex: 0 0 auto; margin-left: 12px; }
+    .profile-choice-check { visibility: hidden; color: var(--muted); }
+    .profile-choice-option[aria-checked="true"] .profile-choice-check { visibility: visible; }
+
+    form.sizing-panel { padding: 8px 14px 14px; gap: 14px; font-size: 14px; }
+    .sizing-modes {
+      display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px;
+      border-bottom: 1px solid var(--line);
+    }
+    .sizing-mode { position: relative; cursor: pointer; min-width: 0; }
+    .sizing-mode input {
+      position: absolute; width: 1px; height: 1px; opacity: 0; margin: 0; padding: 0;
+    }
+    .sizing-mode-label {
+      display: flex; align-items: center; justify-content: center;
+      min-height: 36px; padding: 5px 3px 8px; margin-bottom: -1px; white-space: nowrap;
+      border-bottom: 2px solid transparent; color: var(--muted); line-height: 16px;
+    }
+    .sizing-mode-caption { font-size: inherit; }
+    .sizing-mode:hover .sizing-mode-caption { color: var(--text); }
+    .sizing-mode input:checked + .sizing-mode-label {
+      border-bottom-color: var(--text); color: var(--text);
+    }
+    html.is-keyboard-navigation .sizing-mode input:focus-visible + .sizing-mode-label {
+      outline: 2px solid var(--accent); outline-offset: 1px;
+    }
+    .sizing-preset-section { display: grid; gap: 8px; }
+    .sizing-presets { display: flex; flex-wrap: wrap; gap: 4px; }
+    .sizing-panel .sizing-preset {
+      display: inline-flex; justify-content: center; align-items: center;
+      height: 22px; padding: 0 8px; font-size: 11px; font-weight: 500;
+      font-variant-numeric: tabular-nums; color: var(--muted);
+    }
+    .sizing-panel .sizing-preset:hover:not(:disabled) { color: var(--text); background: var(--choice-hover); }
+    .sizing-panel .sizing-preset[aria-pressed="true"] { color: var(--text); background: var(--choice-selected); }
+    .sizing-preset-unit { color: var(--muted); }
+    .sizing-editor { display: flex; align-items: center; gap: 8px; }
+    .sizing-editor .sizing-value-field { flex: 1 1 auto; min-width: 0; height: 36px; }
+    .sizing-panel .sizing-apply { height: 30px; padding: 0 12px; font-size: inherit; flex: 0 0 auto; }
+    .sizing-value-field {
+      display: flex; align-items: center; gap: 2px; height: 40px; padding: 0 12px;
+      border: 1px solid var(--line); border-radius: var(--radius-md);
+      background: var(--panel-strong); color: var(--text);
+      font-size: 14px; font-variant-numeric: tabular-nums; cursor: text;
+    }
+    html.is-keyboard-navigation .sizing-value-field:focus-within {
+      border-color: var(--accent); box-shadow: 0 0 0 3px var(--ring);
+    }
+    .sizing-input-wrap { position: relative; min-width: 0; flex: 0 1 auto; }
+    .sizing-value-measure { visibility: hidden; white-space: pre; font: inherit; }
+    .sizing-panel .sizing-value-input,
+    .quick-presets-card .sizing-value-input {
+      position: absolute; inset: 0; width: 100%; min-width: 0;
+      height: 100%; padding: 0; border: 0; border-radius: 0;
+      background: transparent; color: inherit; box-shadow: none; outline: none;
+      font: inherit; font-variant-numeric: inherit;
+    }
+    .sizing-unit { flex: 0 0 auto; font: inherit; color: var(--muted); pointer-events: none; }
+
+    html.is-keyboard-navigation .profile-field select:focus-visible,
+    html.is-keyboard-navigation .setting-card select:focus-visible,
+    html.is-keyboard-navigation .preset-control select:focus-visible,
+    html.is-keyboard-navigation .preset-control textarea:focus-visible {
       outline: none;
       border-color: var(--accent);
       box-shadow: 0 0 0 3px var(--ring);
@@ -466,6 +583,12 @@
     .settings-controls {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
+
+    .setting-card.quick-presets-card { min-width: 0; gap: 8px; flex: none; }
+    .quick-preset-row { display: flex; align-items: center; gap: 8px; }
+    .quick-preset-row .sizing-value-field { flex: 1; min-width: 0; }
+    .quick-preset-remove { width: 30px; height: 30px; padding: 0; font-size: 18px; color: var(--muted); }
+    .quick-preset-add { align-self: flex-start; }
 
     #defaultsSection .setting-card,
     #defaultsSection .toggle-card {
@@ -1036,6 +1159,10 @@
       overflow-wrap: anywhere;
     }
 
+    .metric-cell.is-estimate {
+      cursor: pointer;
+    }
+
     .metric-cell.is-positive {
       color: var(--success);
     }
@@ -1303,6 +1430,8 @@
       color: var(--text);
       max-width: 180px;
     }
+
+    .quick-presets-card input.sizing-value-input { height: 100%; padding: 0; border: 0; max-width: none; background: transparent; }
 
     /* Filename template token editor */
     .name-template-card {
@@ -1613,6 +1742,7 @@
             <input id="settingsImportInput" type="file" accept="application/json,.json" hidden />
           </article>
 
+          <article class="settings-section" id="quickPresetsSection" hidden></article>
           <article class="settings-section preset-editor" id="presetEditorSection" hidden>
             <div class="preset-card-grid" id="presetSettingsControls"></div>
           </article>

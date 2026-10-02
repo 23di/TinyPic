@@ -367,3 +367,299 @@ test('all supported Figma locales render without visible layout overflow', async
     }
   }
 });
+
+
+test('sizing dropdown accepts custom values and remembers each mode', async ({ page }) => {
+  await setup(page);
+  await page.setViewportSize({ width: 360, height: 520 });
+  async function apply(mode, value) {
+    await page.locator('.sizing-control:not(.profile-choice) > .sizing-summary').click();
+    await page.locator(`.sizing-mode input[value="${mode}"]`).check();
+    const presets = page.locator('.sizing-presets button');
+    const count = await presets.count();
+    expect(count).toBeGreaterThanOrEqual(4);
+    expect(count).toBeLessThanOrEqual(5);
+    const presetValue = await presets.last().locator('.sizing-preset-number').textContent();
+    await presets.last().click();
+    await expect(page.locator('form.sizing-panel .sizing-value-input')).toHaveValue(presetValue);
+    await page.locator('form.sizing-panel .sizing-value-input').fill(String(value));
+    await page.getByRole('button', { name: 'Apply', exact: true }).click();
+  }
+  await page.locator('.sizing-control:not(.profile-choice) > .sizing-summary').click();
+  await page.getByRole('button', { name: '2x', exact: true }).click();
+  await expect(page.locator('form.sizing-panel .sizing-value-input')).toHaveValue('2');
+  const valueField = page.locator('form.sizing-panel .sizing-value-field');
+  const applyBounds = await page.getByRole('button', { name: 'Apply', exact: true }).boundingBox();
+  const inputBounds = await valueField.boundingBox();
+  expect(applyBounds.width).toBeLessThan(inputBounds.width);
+  expect(applyBounds.height).toBeLessThanOrEqual(32);
+  await expect(valueField).toHaveCSS('box-shadow', 'none');
+  await page.keyboard.press('Tab');
+  await page.keyboard.press('Shift+Tab');
+  await expect(valueField).not.toHaveCSS('box-shadow', 'none');
+  await page.locator('form.sizing-panel .sizing-value-input').click();
+  await expect(valueField).toHaveCSS('box-shadow', 'none');
+  await expect(page.getByRole('button', { name: '2x', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await page.locator('form.sizing-panel .sizing-value-input').fill('2.25');
+  await expect(page.getByRole('button', { name: '2x', exact: true })).toHaveAttribute('aria-pressed', 'false');
+  await page.getByRole('button', { name: 'Apply', exact: true }).click();
+  await expect(page.locator('.sizing-control:not(.profile-choice) > .sizing-summary')).toHaveText('2.25x');
+  await apply('scale', 1.75);
+  await expect(page.locator('.sizing-control:not(.profile-choice) > .sizing-summary')).toHaveText('1.75x');
+  await apply('size', 200);
+  await expect(page.locator('.sizing-control:not(.profile-choice) > .sizing-summary')).toHaveText('≤ 200 KB');
+  await apply('width', 320);
+  await apply('height', 240);
+  const summaryBounds = await page.locator('.sizing-control:not(.profile-choice) > .sizing-summary').boundingBox();
+  const exportBounds = await page.locator('#exportButton').boundingBox();
+  expect(exportBounds.y + exportBounds.height <= summaryBounds.y || exportBounds.x >= summaryBounds.x + summaryBounds.width).toBe(true);
+  await page.locator('.sizing-control:not(.profile-choice) > .sizing-summary').click();
+  await page.locator('form.sizing-panel .sizing-value-input').fill('241');
+  await page.waitForTimeout(180);
+  await page.evaluate(() => {
+    const request = window.__h.captured.filter((m) => m.type === 'request-estimates').at(-1);
+    window.__h.pluginSend({ type: 'estimates-result', requestId: request.requestId, estimates: {} });
+  });
+  await expect(page.locator('form.sizing-panel .sizing-value-input')).toHaveValue('241');
+  await expect(page.locator('.sizing-control:not(.profile-choice)')).toHaveAttribute('open', '');
+  await page.locator('form.sizing-panel .sizing-value-input').fill('240');
+  const panelBounds = await page.locator('form.sizing-panel').boundingBox();
+  expect(panelBounds.x).toBeGreaterThanOrEqual(16);
+  expect(panelBounds.x + panelBounds.width).toBeLessThanOrEqual(344);
+  await expect(page.locator('.sizing-panel select')).toHaveCount(0);
+  await expect(page.locator('form.sizing-panel .sizing-unit')).toHaveText('px');
+  const field = await page.locator('form.sizing-panel .sizing-value-field').evaluate((field) => {
+    const input = field.querySelector('input');
+    const unit = field.querySelector('.sizing-unit');
+    return { gap: unit.getBoundingClientRect().left - input.getBoundingClientRect().right,
+      inputFont: getComputedStyle(input).fontSize, unitFont: getComputedStyle(unit).fontSize,
+      inputColor: getComputedStyle(input).color, unitColor: getComputedStyle(unit).color };
+  });
+  expect(field.gap).toBeLessThanOrEqual(3);
+  expect(field.unitFont).toBe(field.inputFont);
+  expect(field.unitColor).not.toBe(field.inputColor);
+  await page.screenshot({ path: 'test-results/sizing-dropdown.png' });
+  await page.getByRole('radio', { name: 'Multiplier', exact: true }).check();
+  await expect(page.locator('form.sizing-panel .sizing-value-input')).toHaveValue('1.75');
+  await expect(page.locator('.sizing-mode-value, .sizing-panel-header')).toHaveCount(0);
+  const modeBounds = await page.locator('.sizing-mode').evaluateAll((nodes) => nodes.map((node) => {
+    const rect = node.getBoundingClientRect();
+    return { top: rect.top, left: rect.left, right: rect.right };
+  }));
+  expect(new Set(modeBounds.map((rect) => rect.top)).size).toBe(1);
+  expect(modeBounds.every((rect, index) => index === 0 || rect.left >= modeBounds[index - 1].right)).toBe(true);
+  await page.screenshot({ path: 'test-results/sizing-multiplier.png' });
+  await page.setViewportSize({ width: 360, height: 320 });
+  const fixedPanel = await page.locator('form.sizing-panel').boundingBox();
+  const anchor = await page.locator('.sizing-control:not(.profile-choice) > .sizing-summary').boundingBox();
+  expect(fixedPanel.y).toBeGreaterThanOrEqual(anchor.y + anchor.height);
+  expect(fixedPanel.y).toBe(panelBounds.y);
+  expect(fixedPanel.y + fixedPanel.height).toBeLessThanOrEqual(304);
+  await page.setViewportSize({ width: 360, height: 520 });
+  await page.keyboard.press('Escape');
+  await expect(page.locator('.sizing-control:not(.profile-choice)')).not.toHaveAttribute('open', '');
+  await page.waitForTimeout(250);
+  const profile = await page.evaluate(() => JSON.parse(localStorage.getItem('fcompressor_v1_profile')));
+  expect(profile).toMatchObject({ scale: 1.75, exportMode: 'height', maxKB: 200, maxWidth: 320, maxHeight: 240 });
+  await page.locator('[data-choice="format"] > summary').click();
+  await page.getByRole('menuitemradio', { name: 'SVG', exact: true }).click();
+  await expect(page.locator('.sizing-control:not(.profile-choice)')).toHaveCount(0);
+});
+
+for (const format of ['PNG', 'JPG', 'WEBP']) {
+  test(`file limit compresses a real ${format} payload below the requested bytes`, async ({ page }) => {
+    await setup(page);
+    await page.evaluate(async (format) => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 400;
+      canvas.height = 200;
+      const ctx = canvas.getContext('2d');
+      const data = ctx.createImageData(400, 200);
+      let seed = 12345;
+      for (let i = 0; i < data.data.length; i += 4) {
+        for (let j = 0; j < 3; j += 1) {
+          seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+          data.data[i + j] = seed >>> 24;
+        }
+        data.data[i + 3] = 255;
+      }
+      ctx.putImageData(data, 0, 0);
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      window.__h.sourceSize = bytes.length;
+      window.__h.sourceBytes = bytes;
+      const originalURL = URL.createObjectURL.bind(URL);
+      URL.createObjectURL = (blob) => {
+        if (blob.type === { PNG: 'image/png', JPG: 'image/jpeg', WEBP: 'image/webp' }[format]) {
+          window.__h.deliveredBlob = blob;
+        }
+        return originalURL(blob);
+      };
+      window.__h.pluginSend({ type: 'estimate-raster', requestId: 900, format,
+        exportMode: 'size', maxKB: 8, sourceMimeType: 'image/png', bytes });
+    }, format);
+    await expect.poll(() => page.evaluate(() => window.__h.captured.find((m) => m.type === 'estimate-raster-result' && m.requestId === 900)), { timeout: 30000 }).toBeTruthy();
+    const result = await page.evaluate(() => ({ sourceSize: window.__h.sourceSize,
+      result: window.__h.captured.find((m) => m.type === 'estimate-raster-result' && m.requestId === 900) }));
+    expect(result.sourceSize).toBeGreaterThan(8 * 1024);
+    expect(result.result.ok).toBe(true);
+    expect(result.result.bytesLength).toBeLessThanOrEqual(8 * 1024);
+    expect(result.result.bytesLength).toBeGreaterThan(0);
+    await page.evaluate((format) => window.__h.pluginSend({ type: 'export-file',
+      sessionId: 'sizing-test', deliveryId: 'sizing-file', rowId: 'n1', format,
+      fileName: `limited.${format.toLowerCase()}`, sourceMimeType: 'image/png',
+      exportMode: 'size', maxKB: 8, bytes: window.__h.sourceBytes,
+    }), format);
+    await expect.poll(() => page.evaluate(() => window.__h.captured.find((m) => m.type === 'export-file-ack' && m.deliveryId === 'sizing-file')), { timeout: 30000 }).toBeTruthy();
+    const delivered = await page.evaluate(async () => {
+      const blob = window.__h.deliveredBlob;
+      const bitmap = blob ? await createImageBitmap(blob) : null;
+      const dimensions = bitmap ? { width: bitmap.width, height: bitmap.height } : null;
+      bitmap?.close();
+      return { ack: window.__h.captured.find((m) => m.type === 'export-file-ack' && m.deliveryId === 'sizing-file'), size: blob?.size, dimensions };
+    });
+    expect(delivered.ack.ok).toBe(true);
+    expect(delivered.size).toBeLessThanOrEqual(8 * 1024);
+    expect(delivered.dimensions.width).toBeLessThan(400);
+    expect(Math.abs(delivered.dimensions.width / delivered.dimensions.height - 2)).toBeLessThan(0.1);
+  });
+}
+
+
+test('format and preset menus open below their triggers in a short window', async ({ page }) => {
+  await setup(page);
+  await page.setViewportSize({ width: 360, height: 320 });
+  const format = page.locator('[data-choice="format"]');
+  await format.locator('summary').click();
+  await expect(format.locator('[role="menu"]')).toBeVisible();
+  const anchor = await format.locator('summary').boundingBox();
+  const menu = await format.locator('[role="menu"]').boundingBox();
+  expect(menu.y).toBeGreaterThanOrEqual(anchor.y + anchor.height);
+  expect(menu.y + menu.height).toBeLessThanOrEqual(304);
+  await page.screenshot({ path: 'test-results/format-dropdown.png' });
+  await page.getByRole('menuitemradio', { name: 'JPG', exact: true }).click();
+  await expect(format.locator('summary')).toHaveText('JPG');
+  const preset = page.locator('[data-choice="preset"]');
+  await preset.locator('summary').click();
+  await expect(preset.locator('[role="menu"]')).toBeVisible();
+  const presetAnchor = await preset.locator('summary').boundingBox();
+  const presetMenu = await preset.locator('[role="menu"]').boundingBox();
+  expect(presetMenu.y).toBeGreaterThanOrEqual(presetAnchor.y + presetAnchor.height);
+  await page.getByRole('menuitemradio', { name: 'High', exact: true }).click();
+  await expect(preset.locator('summary')).toHaveText('High');
+  await format.locator('summary').focus();
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Enter');
+  await expect(format.locator('summary')).toHaveText('WebP');
+  await format.locator('summary').click();
+  await page.keyboard.press('Escape');
+  await expect(format).not.toHaveAttribute('open', '');
+});
+
+test('shared settings menus save values and Original files fits its main control', async ({ page }) => {
+  await setup(page);
+  await page.setViewportSize({ width: 360, height: 520 });
+  const preset = page.locator('[data-choice="preset"]');
+  await preset.locator('summary').click();
+  await page.getByRole('menuitemradio', { name: 'Original files', exact: true }).click();
+  await expect(preset.locator('summary')).toHaveText('Original files');
+  const fits = await preset.locator('.choice-selected-label').evaluate((label) => label.scrollWidth <= label.clientWidth);
+  expect(fits).toBe(true);
+  await page.locator('#settingsToggleButton').click();
+  await expect(page.locator('#settingsPanel select')).toHaveCount(0);
+  const format = page.locator('#defaultsControls .settings-choice').first();
+  await format.locator('summary').click();
+  await expect(format.locator('[role="menu"]')).toBeVisible();
+  const anchor = await format.locator('summary').boundingBox();
+  const menu = await format.locator('[role="menu"]').boundingBox();
+  expect(menu.y).toBeGreaterThanOrEqual(anchor.y + anchor.height);
+  expect(menu.x).toBeGreaterThanOrEqual(16);
+  expect(menu.x + menu.width).toBeLessThanOrEqual(344);
+  expect(menu.y).toBeCloseTo(anchor.y + anchor.height + 8, 0);
+  await page.screenshot({ path: 'test-results/settings-dropdown.png' });
+  await page.getByRole('menuitemradio', { name: 'JPG', exact: true }).click();
+  await expect(format.locator('summary')).toHaveText('JPG');
+  await expect.poll(() => page.evaluate(() => window.__h.captured.filter((m) => m.type === 'persist-state').at(-1)?.state.defaults.format)).toBe('JPG');
+  const scale = page.locator('#defaultsControls .settings-choice').nth(1);
+  await scale.locator('summary').click();
+  await page.getByRole('menuitemradio', { name: '2x', exact: true }).click();
+  await expect(scale.locator('summary')).toHaveText('2x');
+  await expect.poll(() => page.evaluate(() => window.__h.captured.filter((m) => m.type === 'persist-state').at(-1)?.state.defaults.scale)).toBe(2);
+  await page.getByRole('button', { name: 'JPG', exact: true }).click();
+  await page.locator('.preset-card-toggle').first().click();
+  const quality = page.locator('.preset-card').first().locator('.settings-choice');
+  await quality.locator('summary').click();
+  await page.getByRole('menuitemradio', { name: '62', exact: true }).click();
+  await expect(quality.locator('summary')).toHaveText('62');
+  await expect.poll(() => page.evaluate(() => window.__h.captured.filter((m) => m.type === 'persist-state').at(-1)?.state.presetSettings.JPG['photo-high'].quality)).toBe(62);
+});
+
+
+test('Export becomes a download icon, then moves above dropdowns when space runs out', async ({ page }) => {
+  await setup(page);
+  const button = page.locator('#exportButton');
+  await page.setViewportSize({ width: 640, height: 520 });
+  await expect(button).toHaveText('Export 2');
+  await page.setViewportSize({ width: 360, height: 520 });
+  await expect(button).toHaveClass(/is-export-icon/);
+  await expect(button.locator('svg')).toBeVisible();
+  await expect(button).toHaveAttribute('aria-label', 'Export 2');
+  const controls = page.locator('#profileStack');
+  let exportBox = await button.boundingBox();
+  let controlBox = await controls.boundingBox();
+  expect(exportBox.y).toBe(controlBox.y);
+  await page.screenshot({ path: 'test-results/export-icon.png' });
+  await page.locator('[data-choice="preset"] > summary').click();
+  await page.getByRole('menuitemradio', { name: 'Original files', exact: true }).click();
+  await expect(page.locator('.topbar-head')).toHaveClass(/is-stacked-export/);
+  exportBox = await button.boundingBox();
+  controlBox = await controls.boundingBox();
+  expect(exportBox.y + exportBox.height).toBeLessThan(controlBox.y);
+  expect(exportBox.x).toBe(controlBox.x);
+  await page.screenshot({ path: 'test-results/export-above.png' });
+  await page.setViewportSize({ width: 640, height: 520 });
+  await expect(button).toHaveText('Export 2');
+  await expect(page.locator('.topbar-head')).not.toHaveClass(/is-stacked-export/);
+  await page.setViewportSize({ width: 360, height: 520 });
+  await expect(button).toHaveClass(/is-export-icon/);
+  await button.click();
+  await expect(button).toHaveClass(/is-stop/);
+  await expect(button).toHaveAttribute('aria-label', /Stop export/);
+  expect((await button.boundingBox()).width).toBe(36);
+  await button.click();
+  await expect.poll(() => page.evaluate(() => window.__h.captured.some((message) => message.type === 'cancel-export'))).toBe(true);
+});
+
+test('quick presets can be edited, removed, added and restored from saved settings', async ({ page }) => {
+  await setup(page);
+  await page.locator('#settingsToggleButton').click();
+  await page.getByRole('button', { name: 'Sizing', exact: true }).click();
+  const scale = page.locator('#quickPresetsSection [data-mode="scale"]');
+  await expect(scale.locator('input')).toHaveCount(5);
+  await expect(scale.getByRole('button', { name: 'Add preset', exact: true })).toBeDisabled();
+  await scale.locator('input').first().fill('0.75');
+  await scale.locator('input').first().press('Tab');
+  await expect.poll(() => page.evaluate(() => window.__h.captured.filter(m => m.type === 'persist-state').at(-1)?.state.quickPresets.scale[0])).toBe(0.75);
+  await scale.locator('.quick-preset-remove').last().click();
+  await expect(scale.locator('input')).toHaveCount(4);
+  await scale.getByRole('button', { name: 'Add preset', exact: true }).click();
+  await expect(scale.locator('input')).toHaveCount(5);
+  await scale.locator('input').last().fill('3');
+  await scale.locator('input').last().press('Tab');
+  const size = page.locator('#quickPresetsSection [data-mode="size"]');
+  while (await size.locator('input').count()) await size.locator('.quick-preset-remove').first().click();
+  await page.setViewportSize({ width: 360, height: 520 });
+  await page.screenshot({ path: 'test-results/quick-presets-settings.png' });
+  await expect.poll(() => page.evaluate(() => window.__h.captured.filter(m => m.type === 'persist-state').at(-1)?.state.quickPresets.scale)).toEqual([0.75, 1, 1.5, 2, 3]);
+  const saved = await page.evaluate(() => window.__h.captured.filter(m => m.type === 'persist-state').at(-1).state);
+  expect(saved.quickPresets.size).toEqual([]);
+  await page.evaluate((state) => window.__h.pluginSend({ type: 'bootstrap', state, nodes: [] }), saved);
+  await page.locator('#settingsCloseButton').click();
+  await page.locator('.sizing-control:not(.profile-choice) > summary').click();
+  await expect(page.locator('.sizing-preset')).toHaveCount(5);
+  await expect(page.getByRole('button', { name: '0.75x', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '3x', exact: true })).toBeVisible();
+  await page.getByRole('radio', { name: 'File Size', exact: true }).check();
+  await expect(page.locator('.sizing-preset')).toHaveCount(0);
+});

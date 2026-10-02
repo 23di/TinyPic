@@ -232,3 +232,54 @@ test('closeAfterExport closes the plugin once the export finishes', async () => 
   await p.tick(700); // closeAfterExport uses a 500ms timer
   assert.notEqual(p.closed(), null, 'figma.closePlugin was called');
 });
+
+
+test('custom sizing survives persistence and sets proportional export scales', async () => {
+  const constraints = [];
+  const p = createPlugin({ nodes: [makeNode('n1', 'Landscape', {
+    width: 1200, height: 600,
+    exportAsync: async (settings) => {
+      constraints.push(settings.constraint);
+      return new Uint8Array([1, 2, 3]);
+    },
+  })] });
+  const base = await bootstrap(p);
+  const profile = { id: 'p1', format: 'JPG', preset: 'web-jpg', scale: 1.75,
+    exportMode: 'width', maxWidth: 300, maxHeight: 200, maxKB: 200 };
+  await p.send({ type: 'persist-state', state: { ...base, profiles: [profile] } });
+  const saved = await bootstrap(p);
+  assert.equal(saved.profiles[0].scale, 1.75);
+  assert.equal(saved.profiles[0].exportMode, 'width');
+  assert.equal(saved.profiles[0].maxKB, 200);
+  for (const [exportMode, expectedScale] of [['scale', 1.75], ['width', 0.25], ['height', 1 / 3], ['size', 1]]) {
+    constraints.length = 0;
+    const { files } = await runExport(p, [{ ...row(base, { format: 'JPG' }), ...profile, nodeId: 'n1', exportMode }], { base });
+    assert.equal(constraints[0].value, expectedScale, exportMode);
+    assert.equal(files[0].exportMode, exportMode);
+  }
+  constraints.length = 0;
+  await runExport(p, [{ ...row(base), exportMode: 'width', maxWidth: 2400 }], { base });
+  assert.equal(constraints[0].value, 1, 'width limit does not upscale');
+});
+
+test('file size estimates carry the limit to UI compression for each raster format', async () => {
+  const p = createPlugin();
+  const base = await bootstrap(p);
+  const rows = ['PNG', 'JPG', 'WEBP'].map((format) => ({ ...row(base, { format, id: format }), exportMode: 'size', maxKB: 200 }));
+  const { rasterRequests } = await requestEstimates(p, rows, { base });
+  for (const format of ['PNG', 'JPG', 'WEBP']) {
+    assert.ok(rasterRequests.some((message) => message.format === format && message.exportMode === 'size' && message.maxKB === 200));
+  }
+});
+
+test('quick presets survive storage and export, including an empty group', async () => {
+  const p = createPlugin();
+  await bootstrap(p);
+  await p.send({ type: 'persist-state', state: { quickPresets: { scale: [0.75, 3, 3, -1], size: [], width: [800], height: [600] } } });
+  await p.tick(20);
+  const saved = p.persisted.at(-1).value;
+  assert.equal(JSON.stringify(saved.quickPresets.scale), '[0.75,3]');
+  assert.equal(JSON.stringify(saved.quickPresets.size), '[]');
+  await runExport(p, [row(saved)], { base: saved });
+  assert.equal(JSON.stringify(p.persisted.at(-1).value.quickPresets), JSON.stringify(saved.quickPresets));
+});

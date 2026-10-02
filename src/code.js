@@ -1,3 +1,4 @@
+import { normalizeSizing, resolveSizingScale, positiveNumber, normalizeQuickPresets } from './export-sizing.js';
 import { optimize as optimizeSvg } from 'svgo/browser';
 
 const STORAGE_KEY = 'frame-exporter-plugin-state-v1';
@@ -515,21 +516,7 @@ function getPresetDefinition(format, preset) {
 }
 
 function normalizeScale(value) {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed)) {
-    return DEFAULT_STATE.defaults.scale;
-  }
-
-  let closest = SCALE_OPTIONS[0];
-  let minDistance = Math.abs(parsed - closest);
-  SCALE_OPTIONS.forEach((option) => {
-    const distance = Math.abs(parsed - option);
-    if (distance < minDistance) {
-      closest = option;
-      minDistance = distance;
-    }
-  });
-  return closest;
+  return positiveNumber(value, 1, 0.01, 16);
 }
 
 function normalizeExportConcurrency(value) {
@@ -551,7 +538,7 @@ function createDefaultProfile(defaults, id) {
     id: typeof id === 'string' && id ? id : 'profile-1',
     format,
     preset: getDefaultPresetForFormat(safeDefaults, format),
-    scale: normalizeScale(safeDefaults.scale),
+    ...normalizeSizing(safeDefaults),
   };
 }
 
@@ -564,6 +551,7 @@ function normalizeProfiles(rawProfiles, defaults) {
     const safeProfile = profile && typeof profile === 'object' ? profile : {};
     const format = FORMAT_META[safeProfile.format] ? safeProfile.format : defaults.format;
     return {
+      ...normalizeSizing(safeProfile),
       id: typeof safeProfile.id === 'string' && safeProfile.id ? safeProfile.id : `profile-${index + 1}`,
       format,
       preset: normalizePreset(
@@ -865,6 +853,7 @@ function normalizeState(state) {
       preserveFolderStructure: safeSettings.preserveFolderStructure !== false,
     },
     presetSettings: normalizePresetSettings(safeState.presetSettings),
+    quickPresets: normalizeQuickPresets(safeState.quickPresets),
     profiles: normalizeProfiles(safeState.profiles, defaults),
   };
 }
@@ -963,7 +952,8 @@ function buildRasterSourceSettings(scale) {
 }
 
 function isOriginalFilesPreset(row) {
-  return Boolean(row && row.format === 'PNG' && row.preset === 'original');
+  return Boolean(row && row.format === 'PNG' && row.preset === 'original'
+    && row.exportMode === 'scale' && row.scale === 1);
 }
 
 function matchesSignature(bytes, signature, offset = 0) {
@@ -1088,6 +1078,7 @@ function buildEstimateSettings(row, presetSettings) {
   }
 
   if (row.format === 'JPG') {
+    if (row.exportMode === 'size') return buildRasterSourceSettings(row.scale);
     return {
       format: 'JPG',
       constraint: { type: 'SCALE', value: row.scale },
@@ -1396,6 +1387,7 @@ function normalizeRow(row, defaults) {
   return {
     id: typeof safeRow.id === 'string' && safeRow.id ? safeRow.id : nodeId,
     nodeId,
+    ...normalizeSizing(safeRow),
     format,
     preset: normalizePreset(format, safeRow.preset),
     scale: normalizeScale(safeRow.scale !== undefined ? safeRow.scale : defaults.scale),
@@ -1494,6 +1486,9 @@ async function handleEstimateRequest(message) {
       return;
     }
 
+    if (!isVectorFormat(row.format)) {
+      row.scale = resolveSizingScale(row, node.width, node.height);
+    }
     const presetSettings = getPresetSettings(presetSettingsState, row.format, row.preset);
     let bytes = null;
     let baselineBytes = null;
@@ -1521,12 +1516,14 @@ async function handleEstimateRequest(message) {
           return;
         }
         const safeCurrentBytes = assertExportBytes(currentBytes);
-        if (row.format === 'WEBP') {
+        if (row.format === 'WEBP' || (!isVectorFormat(row.format) && row.exportMode === 'size')) {
           bytes = await requestRasterEstimateBytes(
             safeCurrentBytes,
             row.format,
             getSourceMimeType(row),
             presetSettings,
+            undefined,
+            row,
           );
           if (requestId !== latestEstimateRequestId) {
             return;
@@ -1558,6 +1555,7 @@ async function handleEstimateRequest(message) {
           buildEstimateSettings(
             {
               ...row,
+              exportMode: 'scale',
               scale: isVectorFormat(row.format) ? row.scale : 1,
             },
             presetSettings,
@@ -1745,7 +1743,7 @@ async function waitForFileAck(session, deliveryId, timeoutMs) {
   });
 }
 
-async function requestRasterEstimateBytes(bytes, format, sourceMimeType, presetSettings, timeoutMs = 12000) {
+async function requestRasterEstimateBytes(bytes, format, sourceMimeType, presetSettings, timeoutMs = 12000, sizing = {}) {
   const requestId = createRasterEstimateId();
   const sourceBytes = assertExportBytes(bytes);
   const timeout = Number.isFinite(timeoutMs) ? timeoutMs : 12000;
@@ -1767,6 +1765,7 @@ async function requestRasterEstimateBytes(bytes, format, sourceMimeType, presetS
 
     postToUI({
       type: 'estimate-raster',
+      ...normalizeSizing(sizing),
       requestId,
       format,
       sourceMimeType: sourceMimeType || 'image/png',
@@ -1952,6 +1951,7 @@ async function handleExport(message) {
   const normalized = normalizeState({
     defaults: message.defaults,
     settings: message.settings,
+    quickPresets: message.quickPresets || latestStoredState.quickPresets,
     presetSettings: message.presetSettings,
     profiles: message.profiles,
   });
@@ -2026,6 +2026,9 @@ async function handleExport(message) {
     }
 
     const summary = toNodeSummary(node);
+    if (!isVectorFormat(row.format)) {
+      row.scale = resolveSizingScale(row, node.width, node.height);
+    }
     const presetSettings = getPresetSettings(presetSettingsState, row.format, row.preset);
     let originalAsset = null;
 
@@ -2073,7 +2076,7 @@ async function handleExport(message) {
         rowId: row.id,
         format: row.format,
         preset: row.preset,
-        scale: row.scale,
+        ...normalizeSizing(row),
         fileName,
         mimeType: originalAsset ? originalAsset.mimeType : FORMAT_META[row.format].mimeType,
         sourceMimeType: originalAsset ? originalAsset.mimeType : getSourceMimeType(row),
