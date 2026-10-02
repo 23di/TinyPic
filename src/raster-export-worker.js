@@ -1,3 +1,4 @@
+import { drawJpgSource } from './format-options.js';
 import LibImageQuant from '@fe-daily/libimagequant-wasm';
 import * as wasmModuleNamespace from '@fe-daily/libimagequant-wasm/wasm/libimagequant_wasm.js';
 import initOxipng, { optimise as optimisePngSync } from '@jsquash/oxipng/codec/pkg/squoosh_oxipng.js';
@@ -234,7 +235,8 @@ async function preparePngPayload(sourceBytes, sourceMimeType, presetSettings) {
 async function prepareJpgPayload(sourceBytes, sourceMimeType, presetSettings) {
   const source = await loadRasterSource(sourceBytes, sourceMimeType || 'image/png');
   try {
-    const { canvas } = createRasterCanvas(source, true);
+    const { canvas, ctx } = createRasterCanvas(source, false);
+    drawJpgSource(canvas, ctx, source, presetSettings);
     return {
       bytes: await canvasToBytes(canvas, 'image/jpeg', (presetSettings.quality || 84) / 100),
       mimeType: 'image/jpeg',

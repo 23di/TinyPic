@@ -251,11 +251,12 @@ test('custom sizing survives persistence and sets proportional export scales', a
   assert.equal(saved.profiles[0].scale, 1.75);
   assert.equal(saved.profiles[0].exportMode, 'width');
   assert.equal(saved.profiles[0].maxKB, 200);
-  for (const [exportMode, expectedScale] of [['scale', 1.75], ['width', 0.25], ['height', 1 / 3], ['size', 1]]) {
+  for (const [exportMode, expectedScale, suffix] of [['scale', 1.75, '1.75x'], ['width', 0.25, 'w300px'], ['height', 1 / 3, 'h200px'], ['size', 1, '200kb']]) {
     constraints.length = 0;
     const { files } = await runExport(p, [{ ...row(base, { format: 'JPG' }), ...profile, nodeId: 'n1', exportMode }], { base });
     assert.equal(constraints[0].value, expectedScale, exportMode);
     assert.equal(files[0].exportMode, exportMode);
+    assert.equal(files[0].fileName, `Landscape@${suffix}.jpg`);
   }
   constraints.length = 0;
   await runExport(p, [{ ...row(base), exportMode: 'width', maxWidth: 2400 }], { base });
@@ -282,4 +283,54 @@ test('quick presets survive storage and export, including an empty group', async
   assert.equal(JSON.stringify(saved.quickPresets.size), '[]');
   await runExport(p, [row(saved)], { base: saved });
   assert.equal(JSON.stringify(p.persisted.at(-1).value.quickPresets), JSON.stringify(saved.quickPresets));
+});
+
+
+test('Sizing is the default filename token and the previous default migrates on load', async () => {
+  const p = createPlugin();
+  const base = await bootstrap(p);
+  assert.equal(JSON.stringify(base.settings.nameTemplate), JSON.stringify([T.name, { type: 'var', key: 'sizing' }]));
+  await p.send({ type: 'persist-state', state: { ...base, settings: { ...base.settings, nameTemplate: [T.name, T.scale] } } });
+  const migrated = await bootstrap(p);
+  assert.equal(migrated.settings.nameTemplate[1].key, 'sizing');
+  const { files } = await runExport(p, [row(migrated, { format: 'SVG' })], { base: migrated });
+  assert.equal(files[0].fileName, 'Icon@original.svg');
+});
+
+
+test('Default sizing persists and applies fixed sizing only when reopening', async () => {
+  const p = createPlugin();
+  const base = await bootstrap(p);
+  const profile = { ...base.profiles[0], exportMode: 'size', maxKB: 350 };
+  await p.send({ type: 'persist-state', state: { ...base, defaults: { ...base.defaults, sizingPreference: 'fixed', exportMode: 'width', maxWidth: 900 }, profiles: [profile] } });
+  assert.equal(p.persisted.at(-1).value.profiles[0].exportMode, 'size');
+  let reopened = await bootstrap(p);
+  assert.equal(reopened.defaults.maxWidth, 900);
+  assert.equal(reopened.profiles[0].exportMode, 'width');
+  assert.equal(reopened.profiles[0].maxWidth, 900);
+  await p.send({ type: 'persist-state', state: { ...reopened, defaults: { ...reopened.defaults, sizingPreference: 'last-used' }, profiles: [profile] } });
+  reopened = await bootstrap(p);
+  assert.equal(reopened.profiles[0].exportMode, 'size');
+  assert.equal(reopened.profiles[0].maxKB, 350);
+});
+
+test('PDF layout and JPG appearance settings persist and reach estimates and export', async () => {
+  const p = createPlugin();
+  const base = await bootstrap(p);
+  base.presetSettings.JPG['web-jpg'].background = '#000000';
+  base.presetSettings.JPG['web-jpg'].useAbsoluteBounds = true;
+  Object.assign(base.presetSettings.PDF['document-pdf'], { pageSize: 'letter', orientation: 'landscape', marginMM: 15 });
+  await p.send({ type: 'persist-state', state: base });
+  const saved = await bootstrap(p);
+  assert.equal(saved.presetSettings.PDF['document-pdf'].marginMM, 15);
+  assert.equal(saved.presetSettings.JPG['web-jpg'].useAbsoluteBounds, true);
+  const rows = [row(saved, { id: 'jpg', format: 'JPG' }), row(saved, { id: 'pdf', format: 'PDF' })];
+  const { rasterRequests } = await requestEstimates(p, rows, { base: saved });
+  assert.deepEqual(rasterRequests.map((request) => request.format).sort(), ['JPG', 'PDF']);
+  const jpg = rasterRequests.find((request) => request.format === 'JPG');
+  assert.equal(jpg.sourceMimeType, 'image/png');
+  assert.equal(jpg.presetSettings.background, '#000000');
+  const { files } = await runExport(p, rows, { base: saved });
+  assert.equal(files.find((file) => file.format === 'JPG').presetSettings.useAbsoluteBounds, true);
+  assert.equal(files.find((file) => file.format === 'PDF').presetSettings.orientation, 'landscape');
 });

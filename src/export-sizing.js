@@ -39,9 +39,35 @@ export function normalizeSizing(value = {}) {
   };
 }
 
+export function normalizeDefaultSizing(value = {}) {
+  return { ...normalizeSizing(value), sizingPreference: value.sizingPreference === 'fixed' ? 'fixed' : 'last-used' };
+}
+
+export function applyDefaultSizing(state) {
+  if (state.defaults.sizingPreference !== 'fixed') return state;
+  return { ...state, profiles: state.profiles.map((profile) => ({ ...profile, ...normalizeSizing(state.defaults) })) };
+}
+
 export function resolveSizingScale(value, width, height) {
   const sizing = normalizeSizing(value);
   if (sizing.exportMode === 'width') return Math.min(1, sizing.maxWidth / Math.max(1, width));
   if (sizing.exportMode === 'height') return Math.min(1, sizing.maxHeight / Math.max(1, height));
   return sizing.exportMode === 'size' ? 1 : sizing.scale;
+}
+
+export function formatSizingFileSuffix(value = {}, original = false) {
+  if (original || value.format === 'SVG' || value.format === 'PDF') return 'original';
+  const sizing = normalizeSizing(value);
+  if (sizing.exportMode === 'size') return `${sizing.maxKB}kb`;
+  if (sizing.exportMode === 'width') return `w${sizing.maxWidth}px`;
+  if (sizing.exportMode === 'height') return `h${sizing.maxHeight}px`;
+  return `${sizing.scale}x`;
+}
+
+export function migrateDefaultNameTemplate(state = {}) {
+  const template = state.settings && state.settings.nameTemplate;
+  if (!Array.isArray(template) || template.length !== 2
+    || template[0]?.type !== 'var' || template[0]?.key !== 'name'
+    || template[1]?.type !== 'var' || template[1]?.key !== 'scale') return state;
+  return { ...state, settings: { ...state.settings, nameTemplate: [template[0], { type: 'var', key: 'sizing' }] } };
 }

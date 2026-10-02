@@ -1,4 +1,5 @@
-import { normalizeSizing, resolveSizingScale, positiveNumber, normalizeQuickPresets } from './export-sizing.js';
+import { normalizeFormatOption, needsJpgProcessing, needsPdfLayout } from './format-options.js';
+import { normalizeDefaultSizing, applyDefaultSizing, formatSizingFileSuffix, migrateDefaultNameTemplate, normalizeSizing, resolveSizingScale, positiveNumber, normalizeQuickPresets } from './export-sizing.js';
 import { optimize as optimizeSvg } from 'svgo/browser';
 
 const STORAGE_KEY = 'frame-exporter-plugin-state-v1';
@@ -204,10 +205,10 @@ const PRESET_DEFINITIONS = {
     },
   ],
   JPG: [
-    { value: 'photo-high', settings: { quality: 92 } },
-    { value: 'photo-balanced', settings: { quality: 84 } },
-    { value: 'web-jpg', settings: { quality: 74 } },
-    { value: 'preview-jpg', settings: { quality: 62 } },
+    { value: 'photo-high', settings: { quality: 92, background: '#ffffff', useAbsoluteBounds: true } },
+    { value: 'photo-balanced', settings: { quality: 84, background: '#ffffff', useAbsoluteBounds: true } },
+    { value: 'web-jpg', settings: { quality: 74, background: '#ffffff', useAbsoluteBounds: false } },
+    { value: 'preview-jpg', settings: { quality: 62, background: '#ffffff', useAbsoluteBounds: false } },
   ],
   WEBP: [
     { value: 'lossless-webp', settings: { quality: 100, lossless: true } },
@@ -263,6 +264,9 @@ const PRESET_DEFINITIONS = {
         contentsOnly: true,
         useAbsoluteBounds: false,
         mergePdfs: true,
+        pageSize: 'a4',
+        orientation: 'portrait',
+        marginMM: 10,
       },
     },
     {
@@ -271,6 +275,9 @@ const PRESET_DEFINITIONS = {
         contentsOnly: true,
         useAbsoluteBounds: true,
         mergePdfs: true,
+        pageSize: 'original',
+        orientation: 'auto',
+        marginMM: 0,
       },
     },
     {
@@ -279,6 +286,9 @@ const PRESET_DEFINITIONS = {
         contentsOnly: false,
         useAbsoluteBounds: true,
         mergePdfs: true,
+        pageSize: 'a4',
+        orientation: 'auto',
+        marginMM: 5,
       },
     },
   ],
@@ -313,7 +323,7 @@ function createSvgSvgoPluginState(enabledKeys) {
 
 const DEFAULT_NAME_TEMPLATE = [
   { type: 'var', key: 'name' },
-  { type: 'var', key: 'scale' },
+  { type: 'var', key: 'sizing' },
 ];
 
 const DEFAULT_ARCHIVE_NAME_TEMPLATE = [
@@ -322,7 +332,7 @@ const DEFAULT_ARCHIVE_NAME_TEMPLATE = [
   { type: 'var', key: 'date' },
 ];
 
-const VALID_TEMPLATE_VAR_KEYS = new Set(['name', 'page', 'scale', 'width', 'height', 'date', 'time']);
+const VALID_TEMPLATE_VAR_KEYS = new Set(['name', 'page', 'sizing', 'scale', 'width', 'height', 'date', 'time']);
 const VALID_ARCHIVE_TEMPLATE_VAR_KEYS = new Set([...VALID_TEMPLATE_VAR_KEYS, 'count']);
 
 const DEFAULT_STATE = {
@@ -622,6 +632,8 @@ function normalizeClosestOption(value, options, fallback) {
 }
 
 function normalizePresetSettingValue(format, key, value, fallbackValue) {
+  const formatOption = normalizeFormatOption(format, key, value, fallbackValue);
+  if (formatOption !== undefined) return formatOption;
   switch (format) {
     case 'PNG':
       if (key === 'alphaEnabled') {
@@ -807,7 +819,7 @@ function normalizeState(state) {
     format,
     preset: presets[format],
     presets,
-    scale,
+    ...normalizeDefaultSizing({ ...safeDefaults, scale }),
   };
   const safeSettings = safeState.settings && typeof safeState.settings === 'object'
     ? safeState.settings
@@ -821,7 +833,10 @@ function normalizeState(state) {
         : DEFAULT_STATE.settings.autoEstimateSize,
       closeAfterExport: Boolean(safeSettings.closeAfterExport),
       exportConcurrency: normalizeExportConcurrency(safeSettings.exportConcurrency),
-      nameTemplate: Array.isArray(safeSettings.nameTemplate)
+      nameTemplate: !Array.isArray(safeSettings.nameTemplate)
+        && !['namePrefix', 'nameSuffix', 'nameSeparator', 'includePageName', 'includeScale'].some((key) => key in safeSettings)
+        ? DEFAULT_NAME_TEMPLATE.map((token) => ({ ...token }))
+        : Array.isArray(safeSettings.nameTemplate)
         ? normalizeNameTemplate(safeSettings.nameTemplate)
         : (() => {
             const sep = typeof safeSettings.nameSeparator === 'string'
@@ -881,7 +896,7 @@ function getPresetSettings(settingsState, format, preset) {
 async function loadState() {
   try {
     const state = await figma.clientStorage.getAsync(STORAGE_KEY);
-    return normalizeState(state || DEFAULT_STATE);
+    return applyDefaultSizing(normalizeState(migrateDefaultNameTemplate(state || DEFAULT_STATE)));
   } catch {
     return normalizeState(DEFAULT_STATE);
   }
@@ -1078,10 +1093,13 @@ function buildEstimateSettings(row, presetSettings) {
   }
 
   if (row.format === 'JPG') {
-    if (row.exportMode === 'size') return buildRasterSourceSettings(row.scale);
+    if (row.exportMode === 'size' || needsJpgProcessing(presetSettings)) {
+      return { ...buildRasterSourceSettings(row.scale), useAbsoluteBounds: Boolean(presetSettings.useAbsoluteBounds) };
+    }
     return {
       format: 'JPG',
       constraint: { type: 'SCALE', value: row.scale },
+      useAbsoluteBounds: Boolean(presetSettings.useAbsoluteBounds),
     };
   }
 
@@ -1106,6 +1124,9 @@ function buildEstimateSettings(row, presetSettings) {
 }
 
 function buildExportSourceSettings(row, presetSettings) {
+  if (row.format === 'JPG') {
+    return { ...buildRasterSourceSettings(row.scale), useAbsoluteBounds: Boolean(presetSettings.useAbsoluteBounds) };
+  }
   if (row.format === 'PNG' || row.format === 'JPG' || row.format === 'WEBP') {
     return buildRasterSourceSettings(row.scale);
   }
@@ -1307,6 +1328,9 @@ function evaluateNameTemplate(nodeSummary, format, scale, template, date, option
         case 'page':
           result += sanitizeVarValue(nodeSummary.pageName || '');
           break;
+        case 'sizing':
+          result += `@${formatSizingFileSuffix({ ...options.sizing, format, scale }, ignoreScale)}`;
+          break;
         case 'scale':
           if (!ignoreScale && !isVectorFormat(format)) {
             result += formatScale(scale);
@@ -1357,12 +1381,12 @@ function buildFileNameWithExtension(nodeSummary, extension, settings, options = 
   return `${path}.${sanitizeFileExtension(extension)}`;
 }
 
-function buildFileName(nodeSummary, format, scale, settings, date) {
+function buildFileName(nodeSummary, format, scale, settings, date, sizing = {}) {
   return buildFileNameWithExtension(
     nodeSummary,
     FORMAT_META[format].extension,
     settings,
-    { format, scale, date },
+    { format, scale, date, sizing },
   );
 }
 
@@ -1516,7 +1540,9 @@ async function handleEstimateRequest(message) {
           return;
         }
         const safeCurrentBytes = assertExportBytes(currentBytes);
-        if (row.format === 'WEBP' || (!isVectorFormat(row.format) && row.exportMode === 'size')) {
+        if (row.format === 'WEBP' || (!isVectorFormat(row.format) && row.exportMode === 'size')
+          || (row.format === 'JPG' && needsJpgProcessing(presetSettings))
+          || (row.format === 'PDF' && needsPdfLayout(presetSettings))) {
           bytes = await requestRasterEstimateBytes(
             safeCurrentBytes,
             row.format,
@@ -1565,7 +1591,7 @@ async function handleEstimateRequest(message) {
           return;
         }
         const safeBaselineBytes = assertExportBytes(baselineBuffer);
-        baselineBytes = row.format === 'WEBP'
+        baselineBytes = row.format === 'WEBP' || (row.format === 'JPG' && needsJpgProcessing(presetSettings))
           ? await requestRasterEstimateBytes(
             safeBaselineBytes,
             row.format,
@@ -2042,7 +2068,7 @@ async function handleExport(message) {
 
     const fileName = originalAsset
       ? buildOriginalFileName(summary, originalAsset.extension, normalized.settings, exportDate)
-      : buildFileName(summary, row.format, row.scale, normalized.settings, exportDate);
+      : buildFileName(summary, row.format, row.scale, normalized.settings, exportDate, row);
 
     postToUI({
       type: 'export-row-status',
@@ -2076,6 +2102,7 @@ async function handleExport(message) {
         rowId: row.id,
         format: row.format,
         preset: row.preset,
+        presetSettings,
         ...normalizeSizing(row),
         fileName,
         mimeType: originalAsset ? originalAsset.mimeType : FORMAT_META[row.format].mimeType,

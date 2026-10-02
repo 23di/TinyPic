@@ -1,4 +1,6 @@
-import { normalizeSizing, resolveSizingScale, positiveNumber, normalizeQuickPresets, SIZING_MODES, isValidQuickPreset } from './export-sizing.js';
+import { preparePdfBytes } from './pdf-export.js';
+import { normalizeFormatOption, JPG_BACKGROUNDS, PDF_PAGE_SIZES, PDF_ORIENTATIONS, PDF_MARGINS, drawJpgSource } from './format-options.js';
+import { normalizeDefaultSizing, applyDefaultSizing, formatSizingFileSuffix, migrateDefaultNameTemplate, normalizeSizing, resolveSizingScale, positiveNumber, normalizeQuickPresets, SIZING_MODES, isValidQuickPreset } from './export-sizing.js';
 import LibImageQuant from '@fe-daily/libimagequant-wasm';
 import * as wasmModuleNamespace from '@fe-daily/libimagequant-wasm/wasm/libimagequant_wasm.js';
 import initOxipng, { optimise as optimisePngSync } from '@jsquash/oxipng/codec/pkg/squoosh_oxipng.js';
@@ -248,10 +250,10 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       },
     ],
     JPG: [
-      { value: 'photo-high', settings: { quality: 92 } },
-      { value: 'photo-balanced', settings: { quality: 84 } },
-      { value: 'web-jpg', settings: { quality: 74 } },
-      { value: 'preview-jpg', settings: { quality: 62 } },
+      { value: 'photo-high', settings: { quality: 92, background: '#ffffff', useAbsoluteBounds: true } },
+      { value: 'photo-balanced', settings: { quality: 84, background: '#ffffff', useAbsoluteBounds: true } },
+      { value: 'web-jpg', settings: { quality: 74, background: '#ffffff', useAbsoluteBounds: false } },
+      { value: 'preview-jpg', settings: { quality: 62, background: '#ffffff', useAbsoluteBounds: false } },
     ],
     WEBP: [
       {
@@ -331,6 +333,9 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
           contentsOnly: true,
           useAbsoluteBounds: false,
           mergePdfs: true,
+          pageSize: 'a4',
+          orientation: 'portrait',
+          marginMM: 10,
         },
       },
       {
@@ -339,6 +344,9 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
           contentsOnly: true,
           useAbsoluteBounds: true,
           mergePdfs: true,
+          pageSize: 'original',
+          orientation: 'auto',
+          marginMM: 0,
         },
       },
       {
@@ -347,6 +355,9 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
           contentsOnly: false,
           useAbsoluteBounds: true,
           mergePdfs: true,
+          pageSize: 'a4',
+          orientation: 'auto',
+          marginMM: 5,
         },
       },
     ],
@@ -424,7 +435,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
   };
   const DEFAULT_NAME_TEMPLATE = [
     { type: 'var', key: 'name' },
-    { type: 'var', key: 'scale' },
+    { type: 'var', key: 'sizing' },
   ];
   const DEFAULT_ARCHIVE_NAME_TEMPLATE = [
     { type: 'var', key: 'page' },
@@ -434,6 +445,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
   const NAME_TEMPLATE_VARS = [
     { key: 'name', labelKey: 'template.var.name' },
     { key: 'page', labelKey: 'template.var.page' },
+    { key: 'sizing', labelKey: 'template.var.sizing' },
     { key: 'scale', labelKey: 'template.var.scale' },
     { key: 'width', labelKey: 'template.var.width' },
     { key: 'height', labelKey: 'template.var.height' },
@@ -444,7 +456,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     ...NAME_TEMPLATE_VARS,
     { key: 'count', labelKey: 'template.var.count' },
   ];
-  const VALID_TEMPLATE_VAR_KEYS = new Set(['name', 'page', 'scale', 'width', 'height', 'date', 'time']);
+  const VALID_TEMPLATE_VAR_KEYS = new Set(['name', 'page', 'sizing', 'scale', 'width', 'height', 'date', 'time']);
   const VALID_ARCHIVE_TEMPLATE_VAR_KEYS = new Set([...VALID_TEMPLATE_VAR_KEYS, 'count']);
   const DEFAULT_SETTINGS = {
     autoEstimateSize: true,
@@ -459,7 +471,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     format: 'PNG',
     preset: 'web',
     presets: createDefaultPresetMap(),
-    scale: 1,
+    ...normalizeDefaultSizing(),
   };
   const SETTINGS_GENERAL_TABS = [
     { value: 'defaults', labelKey: 'tab.defaults' },
@@ -500,6 +512,8 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
   let exportButtonAnimationIndex = 0;
   let exportButtonLockedWidth = 0;
   let exportButtonCompact = false;
+  let resetHold = null;
+  const resetFeedback = new Map();
   let activeWarningTooltipTarget = null;
   let rasterExportWorker = null;
   let rasterExportRequestSeed = 0;
@@ -534,7 +548,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       format: DEFAULT_DEFAULTS.format,
       preset: DEFAULT_DEFAULTS.preset,
       presets: createDefaultPresetMap(),
-      scale: DEFAULT_DEFAULTS.scale,
+      ...normalizeDefaultSizing(DEFAULT_DEFAULTS),
     },
     settings: { ...DEFAULT_SETTINGS },
     quickPresets: normalizeQuickPresets(),
@@ -978,6 +992,8 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
   }
 
   function normalizePresetSettingValue(format, key, value, fallbackValue) {
+    const formatOption = normalizeFormatOption(format, key, value, fallbackValue);
+    if (formatOption !== undefined) return formatOption;
     switch (format) {
       case 'PNG':
         if (key === 'alphaEnabled') {
@@ -1166,7 +1182,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
         format: safeFormat,
         preset: safePresets[safeFormat],
         presets: safePresets,
-        scale: safeScale,
+        ...normalizeDefaultSizing({ ...safeDefaults, scale: safeScale }),
       },
       settings: {
         autoEstimateSize: safeSettings.autoEstimateSize !== undefined
@@ -1177,7 +1193,10 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
         locale: normalizeLocalePreference(
           safeSettings.locale !== undefined ? safeSettings.locale : loadLocalePreference(),
         ),
-        nameTemplate: Array.isArray(safeSettings.nameTemplate)
+        nameTemplate: !Array.isArray(safeSettings.nameTemplate)
+          && !['namePrefix', 'nameSuffix', 'nameSeparator', 'includePageName', 'includeScale'].some((key) => key in safeSettings)
+          ? DEFAULT_NAME_TEMPLATE.map((token) => ({ ...token }))
+          : Array.isArray(safeSettings.nameTemplate)
           ? normalizeNameTemplate(safeSettings.nameTemplate)
           : (() => {
               // Legacy migration: reconstruct template from old fields
@@ -1549,6 +1568,9 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
           case 'page':
             result += sanitizeVarValue(row.pageName || '');
             break;
+          case 'sizing':
+            result += `@${formatSizingFileSuffix(row, row.format === 'PNG' && row.preset === 'original' && row.exportMode === 'scale' && row.scale === 1)}`;
+            break;
           case 'scale':
             if (!isVectorFormat(row.format)) {
               result += formatScaleSuffix(row.scale);
@@ -1608,6 +1630,8 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     const safeContext = context && typeof context === 'object' ? context : {};
     const baseName = evaluateNameTemplate(
       {
+        ...normalizeSizing(safeContext),
+        preset: safeContext.preset,
         name: safeContext.name || '',
         pageName: safeContext.pageName || '',
         scale: safeContext.scale !== undefined ? safeContext.scale : 1,
@@ -1890,10 +1914,11 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     persistStateSoon();
   }
 
-  function setDefaultScale(value) {
-    state.defaults.scale = normalizeScale(value);
+  function setDefaultSizing(value, preference = 'fixed') {
+    Object.assign(state.defaults, normalizeDefaultSizing({ ...value, sizingPreference: preference }));
     render();
     persistStateSoon();
+    dom.defaultsControls.querySelector('[data-default-sizing] > summary')?.focus();
   }
 
   function updateExportSetting(key, value) {
@@ -2029,8 +2054,8 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     scheduleEstimate(120);
   }
 
-  function applyImportedSettings(rawState, sourceLabel) {
-    const nextState = normalizeIncomingState(rawState);
+  function applyImportedSettings(rawState, sourceLabel, announce = true) {
+    const nextState = applyDefaultSizing(normalizeIncomingState(rawState));
     state.defaults = nextState.defaults;
     state.settings = nextState.settings;
     saveLocalePreference(state.settings.locale);
@@ -2047,7 +2072,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     render();
     persistStateSoon();
     scheduleEstimate(120);
-    updateFooterStatus(
+    if (announce) updateFooterStatus(
       sourceLabel
         ? tr('status.settingsImportedFrom', { source: sourceLabel })
         : tr('status.settingsImported'),
@@ -2072,8 +2097,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       quickPresets: normalizeQuickPresets(),
       presetSettings: createDefaultPresetSettings(),
       profiles: [createDefaultProfile()],
-    });
-    updateFooterStatus(tr('status.settingsReset'));
+    }, undefined, false);
   }
 
   function revokeRemovedPreviews(nextFrames) {
@@ -2546,6 +2570,10 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
   }
 
   async function prepareDownloadPayload(message) {
+    if (message.format === 'PDF' && !message.skipProcessing) {
+      const settings = message.presetSettings || getPresetSettings(state.presetSettings, 'PDF', message.preset);
+      return { bytes: await preparePdfBytes(toUint8Array(message.bytes), settings), mimeType: 'application/pdf' };
+    }
     const sizing = normalizeSizing(message);
     if (sizing.exportMode !== 'size' || isVectorFormat(message.format)) {
       return prepareRasterPayload(message);
@@ -2637,10 +2665,11 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
 
     const source = await loadRasterSource(sourceBytes, message.sourceMimeType || 'image/png');
     try {
-      const { canvas } = createRasterCanvas(
+      const { canvas, ctx } = createRasterCanvas(
         source,
         message.format === 'JPG' || presetSettings.alphaEnabled === false,
       );
+      if (message.format === 'JPG') drawJpgSource(canvas, ctx, source, presetSettings);
 
       const blob = await canvasToBlob(
         canvas,
@@ -3296,6 +3325,93 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     return card;
   }
 
+  function updateResetButton(button) {
+    const key = button.dataset.resetKey;
+    const completed = (resetFeedback.get(key) || 0) > performance.now();
+    const holding = resetHold?.key === key;
+    button.classList.toggle('is-holding', holding);
+    button.classList.toggle('is-reset-complete', completed);
+    button.disabled = state.isExporting || completed;
+    button.setAttribute('aria-label', completed ? tr('settings.resetDone') : button.dataset.resetLabel);
+    button.querySelector('.hold-reset-fill').style.animationDelay = holding
+      ? `-${Math.max(0, performance.now() - resetHold.started)}ms` : '0ms';
+  }
+
+  function cancelResetHold() {
+    if (!resetHold) return;
+    window.clearTimeout(resetHold.timer);
+    resetHold = null;
+    document.querySelectorAll('[data-reset-key]').forEach(updateResetButton);
+  }
+
+  function getHeldResetButton() {
+    return Array.from(document.querySelectorAll('[data-reset-key]')).find((button) => (
+      button.dataset.resetKey === resetHold?.key && button.getClientRects().length > 0
+    ));
+  }
+
+  function finishResetHold() {
+    const button = getHeldResetButton();
+    if (!resetHold || !button || state.isExporting || state.view !== 'settings') {
+      cancelResetHold();
+      return;
+    }
+    const hold = resetHold;
+    window.clearTimeout(hold.timer);
+    resetHold = null;
+    resetFeedback.set(hold.key, performance.now() + 1000);
+    hold.onReset();
+    document.querySelectorAll('[data-reset-key]').forEach(updateResetButton);
+    window.setTimeout(() => {
+      resetFeedback.delete(hold.key);
+      document.querySelectorAll('[data-reset-key]').forEach(updateResetButton);
+    }, 1000);
+  }
+
+  function syncResetHold() {
+    if (!resetHold) return;
+    const button = getHeldResetButton();
+    if (!button || state.isExporting || state.view !== 'settings') { cancelResetHold(); return; }
+    updateResetButton(button);
+    if (resetHold.input === 'keyboard') button.focus({ preventScroll: true });
+  }
+
+  function createHoldResetControl(key, label, onReset) {
+    const control = createNode('div', 'hold-reset-control');
+    const button = createNode('button', 'ghost-btn hold-reset-button');
+    button.type = 'button';
+    button.dataset.resetKey = key;
+    button.dataset.resetLabel = label;
+    button.setAttribute('aria-live', 'polite');
+    const fill = createNode('span', 'hold-reset-fill');
+    fill.setAttribute('aria-hidden', 'true');
+    button.append(fill, createNode('span', 'hold-reset-idle', label), createNode('span', 'hold-reset-done', tr('settings.resetDone')));
+    const hint = createNode('span', 'hold-reset-hint', tr('settings.holdToReset'));
+    hint.id = `reset-hint-${key}`;
+    button.setAttribute('aria-describedby', hint.id);
+    function start(input, event) {
+      if (button.disabled || resetHold?.key === key) return;
+      cancelResetHold();
+      resetHold = { key, onReset, input, pointerId: event.pointerId, keyboardKey: event.key, started: performance.now() };
+      resetHold.timer = window.setTimeout(finishResetHold, 2000);
+      updateResetButton(button);
+    }
+    button.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0 || !event.isPrimary) return;
+      event.preventDefault();
+      start('pointer', event);
+    });
+    button.addEventListener('keydown', (event) => {
+      if (event.key !== ' ' && event.key !== 'Enter') return;
+      event.preventDefault();
+      if (!event.repeat) start('keyboard', event);
+    });
+    button.addEventListener('click', (event) => { event.preventDefault(); event.stopPropagation(); });
+    updateResetButton(button);
+    control.append(button, hint);
+    return control;
+  }
+
   function createActionCard() {
     const card = createNode('div', 'setting-card action-card');
     const labelNode = createNode('span', 'setting-card-label', tr('settings.file'));
@@ -3315,10 +3431,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       dom.settingsImportInput.click();
     });
 
-    const resetButton = createNode('button', 'ghost-btn', tr('settings.resetAll'));
-    resetButton.type = 'button';
-    resetButton.disabled = controlsDisabled;
-    resetButton.addEventListener('click', resetAllSettings);
+    const resetButton = createHoldResetControl('all-settings', tr('settings.resetAll'), resetAllSettings);
 
     actions.append(exportButton, importButton, resetButton);
     card.append(labelNode, note, actions);
@@ -3425,13 +3538,12 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
         setDefaultFormat,
         controlsDisabled,
       ),
-      createSelectSettingCard(
-        tr('settings.defaultScale'),
-        SCALE_OPTIONS.map((value) => ({ value: String(value), label: formatScale(value) })),
-        String(state.defaults.scale),
-        setDefaultScale,
-        controlsDisabled,
-      ),
+      (() => {
+        const card = createNode('div', 'setting-card');
+        card.append(createNode('span', 'setting-card-label', tr('settings.defaultSizing')),
+          createSizingControl({ ...state.defaults, id: 'default-sizing' }, { defaults: true }));
+        return card;
+      })(),
     ];
 
     FORMAT_OPTIONS.forEach((option) => {
@@ -3595,13 +3707,9 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     const chevron = createNode('span', 'preset-card-chevron');
     chevron.setAttribute('aria-hidden', 'true');
     chevron.appendChild(createChevronIcon());
-    const resetButton = createNode('button', 'ghost-btn preset-card-reset', tr('settings.reset'));
-    resetButton.type = 'button';
-    resetButton.disabled = controlsDisabled;
-    resetButton.addEventListener('click', (e) => {
-      e.stopPropagation();
-      resetPresetToDefault(format, definition.value);
-    });
+    const resetButton = createHoldResetControl(`preset-${format}-${definition.value}`, tr('settings.reset'),
+      () => resetPresetToDefault(format, definition.value));
+    resetButton.classList.add('preset-card-reset');
     toggleButton.addEventListener('click', () => {
       const isCollapsed = card.classList.toggle('is-collapsed');
       if (isCollapsed) {
@@ -3691,6 +3799,17 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
           controlsDisabled,
         ),
       );
+      controlGrid.appendChild(createPresetSelectControl(
+        tr('control.jpgBackground'),
+        JPG_BACKGROUNDS.map((value, index) => ({ value, label: tr(['color.white', 'color.black', 'color.lightGray', 'color.darkGray'][index]) })),
+        presetSettings.background,
+        (value) => updatePresetSetting(format, definition.value, 'background', value),
+        controlsDisabled,
+      ));
+      controlGrid.appendChild(createPresetToggleControl(
+        tr('control.absoluteBounds'), Boolean(presetSettings.useAbsoluteBounds),
+        (value) => updatePresetSetting(format, definition.value, 'useAbsoluteBounds', value), controlsDisabled,
+      ));
     } else if (format === 'WEBP') {
       const qualityControlDisabled = controlsDisabled || Boolean(presetSettings.lossless);
       controlGrid.appendChild(
@@ -3792,6 +3911,25 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
         );
       });
     } else if (format === 'PDF') {
+      controlGrid.appendChild(createPresetSelectControl(
+        tr('control.pdfPageSize'),
+        PDF_PAGE_SIZES.map((value) => ({ value, label: value === 'original' ? tr('pdf.originalSize') : value.toUpperCase() })),
+        presetSettings.pageSize,
+        (value) => updatePresetSetting(format, definition.value, 'pageSize', value), controlsDisabled,
+      ));
+      controlGrid.appendChild(createPresetSelectControl(
+        tr('control.pdfOrientation'),
+        PDF_ORIENTATIONS.map((value) => ({ value, label: tr(`pdf.${value}`) })),
+        presetSettings.orientation,
+        (value) => updatePresetSetting(format, definition.value, 'orientation', value),
+        controlsDisabled || presetSettings.pageSize === 'original',
+      ));
+      controlGrid.appendChild(createPresetSelectControl(
+        tr('control.pdfMargins'),
+        PDF_MARGINS.map((value) => ({ value: String(value), label: `${value} mm` })),
+        String(presetSettings.marginMM),
+        (value) => updatePresetSetting(format, definition.value, 'marginMM', value), controlsDisabled,
+      ));
       controlGrid.appendChild(
         createPresetToggleControl(
           tr('control.mergePdf'),
@@ -3915,7 +4053,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
   }
 
   function handleBootstrap(message) {
-    const nextState = normalizeIncomingState(message.state || {});
+    const nextState = applyDefaultSizing(normalizeIncomingState(migrateDefaultNameTemplate(message.state || {})));
     state.defaults = nextState.defaults;
     state.settings = nextState.settings;
     syncActiveLocale();
@@ -4440,20 +4578,66 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     return formatScale(sizing.scale);
   }
 
-  function createSizingControl(profile) {
+  function positionDropdownPanel(panel, summary, width, centered = false) {
+    const rect = summary.getBoundingClientRect();
+    const margin = 16;
+    const gap = 8;
+    panel.style.width = `${width}px`;
+    panel.style.maxHeight = 'none';
+    const height = panel.getBoundingClientRect().height;
+    const below = Math.max(0, window.innerHeight - rect.bottom - gap - margin);
+    const above = Math.max(0, rect.top - gap - margin);
+    const opensUp = height > below && above > below;
+    const available = opensUp ? above : below;
+    panel.style.maxHeight = `${available}px`;
+    panel.style.top = `${opensUp ? Math.max(margin, rect.top - gap - Math.min(height, available)) : rect.bottom + gap}px`;
+    const left = centered ? rect.left + (rect.width - width) / 2 : rect.left;
+    panel.style.left = `${Math.max(margin, Math.min(left, window.innerWidth - width - margin))}px`;
+  }
+
+  function createSizingControl(profile, options = {}) {
+    const isDefault = Boolean(options.defaults);
+    const lastUsed = isDefault && profile.sizingPreference !== 'fixed';
     const details = createNode('details', 'sizing-control');
-    const summary = createNode('summary', 'sizing-summary', sizingLabel(profile));
-    summary.setAttribute('aria-label', tr('sizing.title'));
+    if (isDefault) { details.classList.add('settings-choice'); details.dataset.defaultSizing = ''; }
+    const summary = createNode('summary', 'sizing-summary', lastUsed ? tr('sizing.lastUsed') : sizingLabel(profile));
+    summary.setAttribute('aria-label', tr(isDefault ? 'settings.defaultSizing' : 'sizing.title'));
     summary.setAttribute('aria-disabled', String(state.isExporting));
-    summary.addEventListener('click', (event) => {
-      if (state.isExporting) {
-        event.preventDefault();
-        return;
-      }
-      if (!details.open) positionPanel();
-    });
     const panel = createNode('form', 'sizing-panel');
+    const useTopLayer = isDefault && typeof panel.showPopover === 'function';
+    if (useTopLayer) panel.setAttribute('popover', 'manual');
+    function syncPanel() {
+      summary.setAttribute('aria-expanded', String(details.open));
+      if (details.open) {
+        if (useTopLayer && !panel.matches(':popover-open')) panel.showPopover();
+        positionPanel();
+      } else if (useTopLayer && panel.matches(':popover-open')) panel.hidePopover();
+    }
+    summary.addEventListener('click', (event) => {
+      event.preventDefault();
+      if (state.isExporting) return;
+      details.open = !details.open;
+      syncPanel();
+    });
     const draft = normalizeSizing(profile);
+    let lastUsedSelected = lastUsed;
+    let lastUsedButton;
+    if (isDefault) {
+      lastUsedButton = createNode('button', 'profile-choice-option', tr('sizing.lastUsed'));
+      lastUsedButton.type = 'button';
+      lastUsedButton.disabled = state.isExporting;
+      lastUsedButton.setAttribute('role', 'radio');
+      lastUsedButton.setAttribute('aria-checked', String(lastUsed));
+      const check = createNode('span', 'profile-choice-check', '✓');
+      check.setAttribute('aria-hidden', 'true');
+      lastUsedButton.appendChild(check);
+      lastUsedButton.addEventListener('click', () => {
+        details.open = false;
+        syncPanel();
+        setDefaultSizing(draft, 'last-used');
+      });
+      panel.appendChild(lastUsedButton);
+    }
     const modes = createNode('div', 'sizing-modes');
     modes.setAttribute('role', 'radiogroup');
     modes.setAttribute('aria-label', tr('sizing.mode'));
@@ -4468,6 +4652,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       radio.checked = mode === draft.exportMode;
       radio.disabled = state.isExporting;
       radio.addEventListener('change', () => {
+        lastUsedSelected = false;
         draft.exportMode = mode;
         syncInput();
       });
@@ -4497,6 +4682,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
         button.setAttribute('aria-label', `${value}${suffix}`);
         button.append(createNode('span', 'sizing-preset-number', String(value)), createNode('span', 'sizing-preset-unit', suffix));
         button.addEventListener('click', () => {
+          lastUsedSelected = false;
           draft[keyForMode[mode]] = value;
           syncInput();
           input.focus();
@@ -4543,10 +4729,16 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       input.value = draft[keyForMode[mode]];
       unit.textContent = mode === 'scale' ? 'x' : mode === 'size' ? 'kb' : 'px';
       renderPresets();
-      modeInputs.forEach((radio) => { radio.checked = radio.value === mode; });
+      modeInputs.forEach((radio) => { radio.checked = !lastUsedSelected && radio.value === mode; });
+      lastUsedButton?.setAttribute('aria-checked', String(lastUsedSelected));
       validateInput();
     }
-    input.addEventListener('input', validateInput);
+    input.addEventListener('input', () => {
+      lastUsedSelected = false;
+      modeInputs.forEach((radio) => { radio.checked = radio.value === draft.exportMode; });
+      lastUsedButton?.setAttribute('aria-checked', 'false');
+      validateInput();
+    });
     inputWrap.append(measure, input);
     valueField.append(inputWrap, unit);
     const apply = createNode('button', 'primary-btn sizing-apply', tr('sizing.apply'));
@@ -4556,8 +4748,12 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
       event.preventDefault();
       if (state.isExporting || !validateInput() || !panel.reportValidity()) return;
       details.open = false;
-      updateProfileValue(profile.id, 'sizing', draft);
-      dom.profileStack.querySelector('.sizing-control:not(.profile-choice) > summary')?.focus();
+      syncPanel();
+      if (isDefault) setDefaultSizing(draft);
+      else {
+        updateProfileValue(profile.id, 'sizing', draft);
+        dom.profileStack.querySelector('.sizing-control:not(.profile-choice) > summary')?.focus();
+      }
     });
     const editor = createNode('div', 'sizing-editor');
     editor.append(valueField, apply);
@@ -4566,20 +4762,15 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     details.addEventListener('keydown', (event) => {
       if (event.key === 'Escape') {
         details.open = false;
+        syncPanel();
         summary.focus();
       }
     });
     function positionPanel() {
-      const rect = summary.getBoundingClientRect();
       const panelWidth = Math.min(328, window.innerWidth - 32);
-      const left = Math.max(16, Math.min(window.innerWidth - panelWidth - 16,
-        rect.left + rect.width / 2 - panelWidth / 2));
-      panel.style.left = `${left}px`;
-      const top = rect.bottom + 8;
-      panel.style.top = `${top}px`;
-      panel.style.maxHeight = `${Math.max(0, window.innerHeight - top - 16)}px`;
+      positionDropdownPanel(panel, summary, panelWidth, true);
     }
-    details.addEventListener('toggle', () => { if (details.open) positionPanel(); });
+    details.addEventListener('toggle', syncPanel);
     details.addEventListener('reposition-sizing', positionPanel);
     syncInput();
     return details;
@@ -4645,19 +4836,15 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     function positionMenu() {
       const rect = summary.getBoundingClientRect();
       const width = Math.min(Math.max(180, rect.width), window.innerWidth - 32);
-      menu.style.width = `${width}px`;
-      const top = rect.bottom + 8;
-      menu.style.left = `${Math.max(16, Math.min(rect.left, window.innerWidth - width - 16))}px`;
-      menu.style.top = `${top}px`;
-      menu.style.maxHeight = `${Math.max(0, window.innerHeight - top - 16)}px`;
+      positionDropdownPanel(menu, summary, width);
     }
     summary.addEventListener('click', (event) => {
       event.preventDefault();
       if (disabled) return;
       details.open = !details.open;
       if (details.open) {
-        positionMenu();
         if (useTopLayer && !menu.matches(':popover-open')) menu.showPopover();
+        positionMenu();
       } else if (useTopLayer && menu.matches(':popover-open')) {
         menu.hidePopover();
       }
@@ -4683,9 +4870,9 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
         details.open = false;
       } else if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
         event.preventDefault();
-        positionMenu();
         details.open = true;
         if (useTopLayer && !menu.matches(':popover-open')) menu.showPopover();
+        positionMenu();
         const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1
           : index < 0 ? Math.max(0, options.findIndex((option) => option.value === value))
           : (index + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length;
@@ -4707,7 +4894,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
 
   function renderProfileStack() {
     // Background estimates must not replace an open editor or its input draft.
-    const signature = JSON.stringify([state.profiles, activeLocale, state.isExporting]);
+    const signature = JSON.stringify([state.profiles, state.quickPresets, activeLocale, state.isExporting]);
     if (dom.profileStack.dataset.signature === signature) return;
     dom.profileStack.dataset.signature = signature;
     dom.profileStack.replaceChildren();
@@ -5121,6 +5308,7 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
     renderTopbarLayout();
     renderRows();
     renderFooter();
+    syncResetHold();
   }
 
   function handleExportFileMessage(message) {
@@ -5311,6 +5499,27 @@ import RasterExportWorker from './raster-export-worker.js?worker&inline';
   }
 
   function wireEvents() {
+    window.addEventListener('pointerup', (event) => {
+      if (resetHold?.input !== 'pointer' || resetHold.pointerId !== event.pointerId) return;
+      if (performance.now() - resetHold.started >= 2000) finishResetHold();
+      else cancelResetHold();
+    });
+    window.addEventListener('pointercancel', cancelResetHold);
+    window.addEventListener('pointermove', (event) => {
+      if (resetHold?.input !== 'pointer' || resetHold.pointerId !== event.pointerId) return;
+      const rect = getHeldResetButton()?.getBoundingClientRect();
+      if (!rect || event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) cancelResetHold();
+    });
+    window.addEventListener('keyup', (event) => {
+      if (resetHold?.input !== 'keyboard' || resetHold.keyboardKey !== event.key) return;
+      if (performance.now() - resetHold.started >= 2000) finishResetHold();
+      else cancelResetHold();
+    });
+    window.addEventListener('blur', cancelResetHold);
+    document.addEventListener('visibilitychange', () => { if (document.hidden) cancelResetHold(); });
+    document.addEventListener('focusin', (event) => {
+      if (resetHold?.input === 'keyboard' && event.target.dataset.resetKey !== resetHold.key) cancelResetHold();
+    });
     const topbarObserver = new ResizeObserver(renderTopbarLayout);
     topbarObserver.observe(dom.topbarHead);
     topbarObserver.observe(dom.profileStack);

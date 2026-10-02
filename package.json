@@ -4,7 +4,7 @@
   "main": "dist/code.js",
   "scripts": {
     "build": "node scripts/build.mjs",
-    "check": "node --check scripts/build.mjs && node --input-type=module --check < src/export-sizing.js && node --input-type=module --check < src/code.js && node --input-type=module --check < src/main.js && node --input-type=module --check < src/i18n.js && node --input-type=module --check < src/raster-export-worker.js",
+    "check": "node --check scripts/build.mjs && node --input-type=module --check < src/export-sizing.js && node --input-type=module --check < src/format-options.js && node --input-type=module --check < src/pdf-export.js && node --input-type=module --check < src/code.js && node --input-type=module --check < src/main.js && node --input-type=module --check < src/i18n.js && node --input-type=module --check < src/raster-export-worker.js",
     "dev": "vite",
     "licenses": "node scripts/generate-third-party-licenses.mjs",
     "preview": "vite preview --outDir dist --port 4173",

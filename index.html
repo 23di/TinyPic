@@ -301,8 +301,8 @@
     .profile-choice-menu.sizing-panel {
       width: min(180px, calc(100vw - 32px)); padding: 6px; gap: 2px;
     }
-    .profile-choice-menu[popover] { margin: 0; right: auto; bottom: auto; }
-    .profile-choice-menu[popover]:not(:popover-open) { display: none; }
+    .sizing-panel[popover] { margin: 0; right: auto; bottom: auto; }
+    .sizing-panel[popover]:not(:popover-open) { display: none; }
     .profile-choice-option {
       display: flex; align-items: center; justify-content: space-between;
       width: 100%; min-height: 36px; padding: 8px 10px;
@@ -310,7 +310,7 @@
       background: transparent; color: var(--text); text-align: left;
       font-size: 12px; line-height: 18px;
     }
-    .profile-choice-option:hover:not(:disabled) { background: var(--choice-hover); }
+    .profile-choice-option:hover:not(:disabled) { background: var(--choice-selected); }
     .profile-choice-option[aria-checked="true"] { background: var(--choice-selected); }
     .profile-choice-option[aria-checked="true"]:hover:not(:disabled) { background: var(--choice-selected); }
     .profile-choice-option > span:first-child { min-width: 0; overflow-wrap: anywhere; }
@@ -347,7 +347,7 @@
       height: 22px; padding: 0 8px; font-size: 11px; font-weight: 500;
       font-variant-numeric: tabular-nums; color: var(--muted);
     }
-    .sizing-panel .sizing-preset:hover:not(:disabled) { color: var(--text); background: var(--choice-hover); }
+    .sizing-panel .sizing-preset:hover:not(:disabled) { color: var(--text); background: var(--choice-selected); }
     .sizing-panel .sizing-preset[aria-pressed="true"] { color: var(--text); background: var(--choice-selected); }
     .sizing-preset-unit { color: var(--muted); }
     .sizing-editor { display: flex; align-items: center; gap: 8px; }
@@ -364,9 +364,9 @@
     }
     .sizing-input-wrap { position: relative; min-width: 0; flex: 0 1 auto; }
     .sizing-value-measure { visibility: hidden; white-space: pre; font: inherit; }
-    .sizing-panel .sizing-value-input,
+    form.sizing-panel input.sizing-value-input,
     .quick-presets-card .sizing-value-input {
-      position: absolute; inset: 0; width: 100%; min-width: 0;
+      position: absolute; inset: 0; width: 100%; min-width: 0; max-width: none;
       height: 100%; padding: 0; border: 0; border-radius: 0;
       background: transparent; color: inherit; box-shadow: none; outline: none;
       font: inherit; font-variant-numeric: inherit;
@@ -1619,6 +1619,20 @@
     .preset-card-reset {
       margin-top: 12px;
     }
+
+    .hold-reset-control { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+    .hold-reset-button { position: relative; display: inline-grid; overflow: hidden; touch-action: none; }
+    .hold-reset-idle, .hold-reset-done { position: relative; grid-area: 1 / 1; align-self: center; }
+    .hold-reset-done { visibility: hidden; }
+    .hold-reset-fill { position: absolute; inset: 0; background: var(--choice-selected); transform: scaleX(0); transform-origin: left; pointer-events: none; }
+    .hold-reset-button.is-holding .hold-reset-fill { animation: hold-reset-fill 2s linear forwards; }
+    .hold-reset-button.is-reset-complete .hold-reset-fill { transform: scaleX(1); }
+    .hold-reset-button.is-reset-complete .hold-reset-idle { visibility: hidden; }
+    .hold-reset-button.is-reset-complete .hold-reset-done { visibility: visible; }
+    .hold-reset-button.is-reset-complete:disabled { opacity: 1; color: var(--text); cursor: default; }
+    .hold-reset-hint { font-size: 11px; line-height: 16px; color: var(--muted); }
+    #settingsDataSection .hold-reset-control { align-items: stretch; }
+    @keyframes hold-reset-fill { from { transform: scaleX(0); } to { transform: scaleX(1); } }
 
     .preset-card-head {
       user-select: none;
